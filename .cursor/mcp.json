@@ -1,0 +1,27 @@
+{
+  "startupScripts": [
+    "scripts/start-central-mcp.sh"
+  ],
+  "mcpServers": {
+    "mcp-docs": {
+      "type": "http",
+      "url": "https://modelcontextprotocol.io/mcp"
+    },
+    "central-memory": {
+      "type": "sse",
+      "url": "http://localhost:3300/memory"
+    },
+    "central-filesystem": {
+      "type": "sse",
+      "url": "http://localhost:3300/filesystem"
+    },
+    "central-everything": {
+      "type": "sse",
+      "url": "http://localhost:3300/everything"
+    },
+    "central-sequentialthinking": {
+      "type": "sse",
+      "url": "http://localhost:3300/sequentialthinking"
+    }
+  }
+}
