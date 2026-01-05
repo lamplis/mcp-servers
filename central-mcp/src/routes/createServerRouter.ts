@@ -1,4 +1,4 @@
-import { Router, json } from "express";
+import { Router } from "express";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import type { ServerFactoryResponse, ServerFactory } from "../types.js";
 
@@ -56,30 +56,30 @@ export function createServerRouter(options: RouterOptions) {
     }
   });
 
-  router.post(
-    "/message",
-    json({ limit: "1mb" }),
-    async (req, res): Promise<void> => {
-      const sessionId = req.query.sessionId as string | undefined;
-      if (!sessionId || !sessions.has(sessionId)) {
-        res.status(400).json({
-          jsonrpc: "2.0",
-          error: {
-            code: -32001,
-            message: "Invalid or missing sessionId",
-          },
-          id: req.body?.id ?? null,
-        });
-        return;
-      }
+  // SSEServerTransport.handlePostMessage reads the raw request stream itself,
+  // so we must NOT use express.json() middleware here
+  router.post("/message", async (req, res): Promise<void> => {
+    const sessionId = req.query.sessionId as string | undefined;
+    if (!sessionId || !sessions.has(sessionId)) {
+      res.status(400).json({
+        jsonrpc: "2.0",
+        error: {
+          code: -32001,
+          message: "Invalid or missing sessionId",
+        },
+        id: null,
+      });
+      return;
+    }
 
-      try {
-        await sessions.get(sessionId)!.transport.handlePostMessage(req, res);
-      } catch (error) {
-        console.error(
-          `[${options.name}] Failed to handle message for session ${sessionId}`,
-          error
-        );
+    try {
+      await sessions.get(sessionId)!.transport.handlePostMessage(req, res);
+    } catch (error) {
+      console.error(
+        `[${options.name}] Failed to handle message for session ${sessionId}`,
+        error
+      );
+      if (!res.headersSent) {
         res.status(500).json({
           jsonrpc: "2.0",
           error: {
@@ -87,11 +87,11 @@ export function createServerRouter(options: RouterOptions) {
             message:
               error instanceof Error ? error.message : "Failed to dispatch message",
           },
-          id: req.body?.id ?? null,
+          id: null,
         });
       }
     }
-  );
+  });
 
   return router;
 }
