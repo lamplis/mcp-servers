@@ -16,7 +16,7 @@ app.use(
     origin: "*",
   })
 );
-app.use(express.json({ limit: "1mb" }));
+// Note: Do NOT add global express.json() here - the SSE transport needs raw request streams
 
 app.get("/health", (_req, res) => {
   res.json({ status: "ok" });
