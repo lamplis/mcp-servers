@@ -1,7 +1,4 @@
 {
-  "startupScripts": [
-    "scripts/start-central-mcp.sh"
-  ],
   "mcpServers": {
     "mcp-docs": {
       "type": "http",
@@ -22,6 +19,10 @@
     "central-sequentialthinking": {
       "type": "sse",
       "url": "http://localhost:3300/sequentialthinking/sse"
+    },
+    "central-fake-qdrant": {
+      "type": "sse",
+      "url": "http://localhost:3300/fake-qdrant/sse"
     }
   }
 }

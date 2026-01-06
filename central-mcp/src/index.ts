@@ -6,9 +6,26 @@ import { createServer as createMemoryServer } from "../../src/memory/server.js";
 import { createServer as createFilesystemServer } from "../../src/filesystem/server.js";
 import { createServer as createEverythingServer } from "../../src/everything/server/index.js";
 import { createServer as createSequentialThinkingServer } from "../../src/sequentialthinking/server.js";
+import { createServer as createFakeQdrantServer } from "../../src/fake-qdrant/server.js";
+import { Store as FakeQdrantStore } from "../../src/fake-qdrant/store.js";
+import { startQdrantHttpServer } from "../../src/fake-qdrant/qdrant-http.js";
 
 const PORT = Number(process.env.PORT ?? 3300);
 const filesystemAllowedDirs = parseDirectories(process.env.FILESYSTEM_ALLOWED_DIRS);
+const fakeQdrantEnabled = process.env.FAKE_QDRANT_ENABLED === "1";
+const fakeQdrantHost = process.env.FAKE_QDRANT_HTTP_HOST;
+const fakeQdrantPort = process.env.FAKE_QDRANT_HTTP_PORT
+  ? Number(process.env.FAKE_QDRANT_HTTP_PORT)
+  : undefined;
+
+let fakeQdrantStorePromise: Promise<FakeQdrantStore> | null = null;
+
+function ensureFakeQdrantStore() {
+  if (!fakeQdrantStorePromise) {
+    fakeQdrantStorePromise = FakeQdrantStore.create();
+  }
+  return fakeQdrantStorePromise;
+}
 
 const app = express();
 app.use(
@@ -62,6 +79,33 @@ app.use(
     factory: () => createSequentialThinkingServer(),
   })
 );
+
+app.use(
+  "/fake-qdrant",
+  createServerRouter({
+    name: "fake-qdrant",
+    messagePath: "/fake-qdrant/message",
+    factory: async () => {
+      const store = await ensureFakeQdrantStore();
+      return createFakeQdrantServer({ store });
+    },
+  })
+);
+
+if (fakeQdrantEnabled) {
+  ensureFakeQdrantStore()
+    .then((store) =>
+      startQdrantHttpServer({
+        store,
+        host: fakeQdrantHost,
+        port: fakeQdrantPort,
+        logger: (message) => console.error(message),
+      })
+    )
+    .catch((error) => {
+      console.error("[fake-qdrant] Failed to start HTTP shim:", error);
+    });
+}
 
 app.listen(PORT, () => {
   console.error(`central-mcp listening on http://localhost:${PORT}`);
