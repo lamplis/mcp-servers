@@ -303,3 +303,6 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 .claude/settings.local.json
+
+# Fake Qdrant local data (vector store)
+src/fake-qdrant/data/

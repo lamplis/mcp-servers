@@ -91,7 +91,7 @@ if ($enableFakeQdrantFinal) {
     if ($FakeQdrantDataDir) {
         $env:FAKE_QDRANT_DATA_DIR = $FakeQdrantDataDir
     }
-    Write-Host "Fake Qdrant HTTP shim enabled on http://$FakeQdrantHost:$FakeQdrantPort" -ForegroundColor Green
+    Write-Host "Fake Qdrant HTTP shim enabled on http://${FakeQdrantHost}:${FakeQdrantPort}" -ForegroundColor Green
 } else {
     Remove-Item Env:FAKE_QDRANT_ENABLED -ErrorAction SilentlyContinue
     Remove-Item Env:FAKE_QDRANT_HTTP_PORT -ErrorAction SilentlyContinue
