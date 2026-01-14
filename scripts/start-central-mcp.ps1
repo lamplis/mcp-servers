@@ -35,22 +35,31 @@ function Stop-ProcessOnPort {
     param ([int]$TargetPort)
 
     try {
-        $connections = Get-NetTCPConnection -LocalPort $TargetPort -State Listen -ErrorAction Stop
-    } catch {
-        return
-    }
-
-    $procIds = $connections | Select-Object -ExpandProperty OwningProcess -Unique
-    foreach ($procId in $procIds) {
-        try {
-            Write-Host "Stopping existing process on port $TargetPort (PID $procId)..." -ForegroundColor Yellow
-            Stop-Process -Id $procId -Force -ErrorAction Stop
-        } catch {
-            Write-Warning "Failed to stop PID ${procId}: $($_.Exception.Message)"
+        $connections = Get-NetTCPConnection -LocalPort $TargetPort -State Listen -ErrorAction SilentlyContinue
+        if (-not $connections) {
+            return
         }
+
+        $procIds = $connections | Select-Object -ExpandProperty OwningProcess -Unique
+        foreach ($procId in $procIds) {
+            try {
+                $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
+                if ($proc) {
+                    Write-Host "Stopping existing process on port $TargetPort (PID $procId, Name: $($proc.ProcessName))..." -ForegroundColor Yellow
+                    Stop-Process -Id $procId -Force -ErrorAction Stop
+                    Start-Sleep -Milliseconds 200
+                }
+            } catch {
+                Write-Warning "Failed to stop PID ${procId}: $($_.Exception.Message)"
+            }
+        }
+    } catch {
+        # Port might not be in use, ignore
     }
 }
 
+# Kill any processes on the ports before starting
+Write-Host "Cleaning up any existing processes on ports $Port and $FakeQdrantPort..." -ForegroundColor Cyan
 Stop-ProcessOnPort -TargetPort $Port
 if ($enableFakeQdrantFinal -and $FakeQdrantPort -gt 0) {
     Stop-ProcessOnPort -TargetPort $FakeQdrantPort

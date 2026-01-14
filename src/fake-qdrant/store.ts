@@ -158,6 +158,82 @@ export class Store {
     await fs.rm(this.collectionDir(name), { recursive: true, force: true });
   }
 
+  /**
+   * Delete points from a collection by IDs or by filter.
+   * @param name Collection name
+   * @param pointIds Optional array of point IDs to delete
+   * @param filter Optional filter function to match points by payload
+   * @returns Number of points deleted
+   */
+  async deletePoints(
+    name: string,
+    pointIds?: (string | number)[],
+    filter?: (payload: unknown) => boolean
+  ): Promise<number> {
+    const collection = await this.getCollection(name);
+    if (!collection) {
+      throw new Error(`Collection not found: ${name}`);
+    }
+
+    const allPoints = await this.loadLatestPoints(name);
+    const idsToDelete = new Set<string | number>();
+
+    if (pointIds && pointIds.length > 0) {
+      for (const id of pointIds) {
+        if (allPoints.has(id)) {
+          idsToDelete.add(id);
+        }
+      }
+    }
+
+    if (filter) {
+      for (const [id, record] of allPoints) {
+        if (filter(record.payload)) {
+          idsToDelete.add(id);
+        }
+      }
+    }
+
+    if (idsToDelete.size === 0) {
+      return 0;
+    }
+
+    // Remove deleted points
+    for (const id of idsToDelete) {
+      allPoints.delete(id);
+    }
+
+    // Rewrite JSONL file
+    const lines = Array.from(allPoints.values())
+      .map((p) =>
+        JSON.stringify({
+          id: p.id,
+          vector: p.vector,
+          payload: p.payload ?? null,
+        })
+      )
+      .join("\n");
+
+    const tempPath = this.pointsPath(name) + ".tmp";
+    await fs.writeFile(tempPath, lines + "\n", "utf8");
+    await fs.rename(tempPath, this.pointsPath(name));
+
+    // Update cache
+    const cache = this.indexCache.get(name);
+    if (cache) {
+      for (const id of idsToDelete) {
+        cache.index.remove(id);
+        cache.payloads.delete(id);
+      }
+      cache.dirty = true;
+      
+      // If index is now empty or entry point was deleted, rebuild might be needed
+      // The HNSW index will handle entry point updates internally
+    }
+
+    return idsToDelete.size;
+  }
+
   async upsertPoints(name: string, points: PointRecord[]): Promise<void> {
     const collection = await this.getCollection(name);
     if (!collection) {
