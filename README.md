@@ -30,6 +30,52 @@ These servers aim to demonstrate MCP features and the official SDKs.
 - **[Memory](src/memory)** - Knowledge graph-based persistent memory system.
 - **[Sequential Thinking](src/sequentialthinking)** - Dynamic and reflective problem-solving through thought sequences.
 - **[Time](src/time)** - Time and timezone conversion capabilities.
+- **[Docsearch](src/docsearch)** - Hybrid semantic + keyword search across local files and web documentation.
+- **[Fake Qdrant](src/fake-qdrant)** - Local Qdrant-compatible vector database using SQLite.
+
+## 🚀 RooCode Quick Setup
+
+Use these MCP servers with [RooCode](https://roocode.com) in 4 steps:
+
+### 1. Clone and Install
+
+```bash
+git clone https://github.com/modelcontextprotocol/servers.git mcp-servers
+cd mcp-servers
+npm install
+```
+
+### 2. Copy Configuration Files
+
+```bash
+# Copy to your project's .roo folder
+copy mcp-servers\mcp-config-roocode.json <YOUR_PROJECT>\.roo\mcp.json
+mkdir <YOUR_PROJECT>\.roo\rules
+copy mcp-servers\.roo\rules\mcp-servers.md <YOUR_PROJECT>\.roo\rules\
+```
+
+### 3. Edit `mcp.json` Placeholders
+
+| Placeholder | Replace With |
+|-------------|--------------|
+| `<MCP_SERVERS_PATH>` | Path to mcp-servers folder (e.g., `C:\\DEVHOME\\GITHUB\\mcp-servers`) |
+| `<YOUR_OPENAI_API_KEY>` | Your OpenAI API key |
+| `<YOUR_PROJECT_PATH>` | Your project's root path |
+| `<ALLOWED_PATH>` | Directory for filesystem access |
+
+### 4. Restart RooCode
+
+Restart VS Code to activate the MCP servers.
+
+### What You Get
+
+The rule file (`mcp-servers.md`) teaches RooCode's AI to:
+- ✅ Check **docsearch** before web searches for indexed documentation
+- ✅ Use **memory** for persistent storage across sessions
+- ✅ Use **filesystem** for cross-project file operations
+- ✅ Use **sequentialthinking** for complex reasoning
+
+📖 **Full setup guide:** [ROOCODE-SETUP.md](ROOCODE-SETUP.md)
 
 ### Archived
 
