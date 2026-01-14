@@ -38,6 +38,10 @@ describe('Fake Qdrant HTTP API Integration Tests', () => {
     if (server) {
       await server.close();
     }
+    // Close SQLite connections before removing files
+    if (store) {
+      store.close();
+    }
     if (testDataDir) {
       try {
         await fs.rm(testDataDir, { recursive: true, force: true });

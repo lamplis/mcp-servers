@@ -16,13 +16,17 @@
     "prepare": "npm run build",
     "watch": "tsc --watch",
     "test": "vitest run --coverage",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "migrate": "npx tsx migrate.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.24.3",
+    "better-sqlite3": "^11.7.0",
+    "sqlite-vec": "^0.1.6",
     "zod": "^3.25.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.10.1",
     "@vitest/coverage-v8": "^2.1.8",
     "shx": "^0.3.4",
