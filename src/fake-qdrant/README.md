@@ -8,9 +8,9 @@ Fake Qdrant implements a subset of the Qdrant vector database API, offering:
 
 - **MCP Tools Interface** - Direct integration with MCP-compatible clients (VS Code, RooCode, Claude Desktop)
 - **HTTP API Shim** - Qdrant-compatible REST API on port 6333 (optional)
-- **HNSW Index** - Efficient approximate nearest neighbor search
-- **Persistent Storage** - Data persisted to disk in JSONL format
-- **Zero External Dependencies** - Pure Node.js implementation, no Docker or external services required
+- **SQLite Vector Search** - Efficient KNN search using sqlite-vec extension
+- **Persistent Storage** - Data persisted to SQLite databases with WAL mode
+- **Zero External Services** - Node.js implementation, no Docker or external services required
 
 ## Architecture
 
@@ -33,12 +33,12 @@ Fake Qdrant implements a subset of the Qdrant vector database API, offering:
               │   Collection Management     │
               └──────────────┬──────────────┘
                              │
-              ┌──────────────┴──────────────┐
-              ▼                             ▼
-┌─────────────────────────┐   ┌─────────────────────────────┐
-│      HNSW Index         │   │      Disk Storage           │
-│  Approximate NN Search  │   │  JSONL + Index Persistence  │
-└─────────────────────────┘   └─────────────────────────────┘
+                             ▼
+              ┌─────────────────────────────┐
+              │     SQLite + sqlite-vec     │
+              │   vec0 Virtual Tables       │
+              │   (KNN Vector Search)       │
+              └─────────────────────────────┘
 ```
 
 ## MCP Tools
@@ -52,9 +52,9 @@ The server exposes the following MCP tools:
 | `fake_qdrant_create_collection` | Create a new collection with vector configuration |
 | `fake_qdrant_delete_collection` | Remove a collection and its data |
 | `fake_qdrant_upsert_points` | Insert or update vector points in a collection |
-| `fake_qdrant_query_points` | Run vector similarity search (HNSW) |
-| `fake_qdrant_compact_collection` | Deduplicate points and rebuild HNSW index |
-| `fake_qdrant_persist_indexes` | Write in-memory HNSW indexes to disk |
+| `fake_qdrant_query_points` | Run vector similarity search (KNN) |
+| `fake_qdrant_compact_collection` | Run SQLite VACUUM to optimize database |
+| `fake_qdrant_persist_indexes` | Flush WAL checkpoint to ensure data durability |
 
 ### Tool Details
 
@@ -373,8 +373,8 @@ curl -X POST "http://localhost:6333/collections/documents/points/delete" \
    }
    ```
 
-3. **Persist indexes before shutdown:**
-   Use the `fake_qdrant_persist_indexes` tool or call the compact endpoint.
+3. **SQLite uses WAL mode:**
+   Data is automatically persisted. Use `fake_qdrant_persist_indexes` to force a WAL checkpoint.
 
 ### Vector Dimension Mismatch
 
@@ -399,28 +399,29 @@ curl -X POST "http://localhost:6333/collections/documents/points/delete" \
 3. **Check for truncated vectors:**
    Ensure your embedding pipeline returns complete vectors.
 
-### HNSW Index Corruption Recovery
+### Database Recovery
 
 **Symptom:** Query returns unexpected results or errors.
 
 **Solutions:**
 
-1. **Compact the collection:**
+1. **Compact the collection (runs VACUUM):**
    ```bash
    curl -X POST "http://localhost:6333/collections/my-collection/compact"
    ```
 
-2. **Delete and rebuild index:**
+2. **Check for WAL files:**
    ```powershell
-   # Remove the hnsw.json file for the affected collection
-   Remove-Item ".\data\my-collection\hnsw.json"
-   # Restart server - index will rebuild from points.jsonl
+   # SQLite WAL files should be automatically merged
+   # If stuck, delete WAL files (data loss possible if uncommitted)
+   Remove-Item ".\data\my-collection.db-wal"
+   Remove-Item ".\data\my-collection.db-shm"
    ```
 
 3. **Full reset (last resort):**
    ```powershell
    # Backup data first!
-   Remove-Item -Recurse ".\data\my-collection"
+   Remove-Item ".\data\my-collection.db"
    ```
 
 ### HTTP API Returns 404
@@ -447,6 +448,23 @@ curl -X POST "http://localhost:6333/collections/documents/points/delete" \
    - Collection names are URL-encoded
    - Points endpoint uses `PUT` for upsert, `POST` for query
 
+## Migration from JSONL Format
+
+If you have existing data from the previous JSONL + HNSW implementation, you can migrate it to the new SQLite format:
+
+```powershell
+cd src/fake-qdrant
+npm run migrate
+# Or specify a custom data directory:
+npx tsx migrate.ts "C:\path\to\data"
+```
+
+The migration utility will:
+1. Find all old-style collections (directories with `meta.json` and `points.jsonl`)
+2. Create new SQLite databases for each collection
+3. Import all points into the new format
+4. Print instructions for removing old data directories
+
 ## Development
 
 ### Building from Source
@@ -471,11 +489,8 @@ npm run test:watch    # Run tests in watch mode
 src/fake-qdrant/
 ├── index.ts           # Entry point (stdio transport)
 ├── server.ts          # MCP server and tool registration
-├── store.ts           # Collection and point management
+├── store.ts           # SQLite + sqlite-vec storage layer
 ├── qdrant-http.ts     # HTTP API shim
-├── hnsw/
-│   ├── index.ts       # HNSW index implementation
-│   └── types.ts       # Type definitions
 ├── __tests__/
 │   └── qdrant-http.test.ts  # Integration tests
 ├── package.json
