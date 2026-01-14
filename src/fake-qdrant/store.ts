@@ -163,7 +163,7 @@ export class Store {
    * @param name Collection name
    * @param pointIds Optional array of point IDs to delete
    * @param filter Optional filter function to match points by payload
-   * @returns Number of points deleted
+   * @returns Number of points deleted (0 if collection doesn't exist)
    */
   async deletePoints(
     name: string,
@@ -172,7 +172,10 @@ export class Store {
   ): Promise<number> {
     const collection = await this.getCollection(name);
     if (!collection) {
-      throw new Error(`Collection not found: ${name}`);
+      // Gracefully return 0 for non-existent collections instead of throwing.
+      // This makes the API more forgiving for clients that try to clean up
+      // points before collections are created.
+      return 0;
     }
 
     const allPoints = await this.loadLatestPoints(name);

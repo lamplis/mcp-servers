@@ -242,6 +242,18 @@ async function handleRequest(
     const pointIds = body?.points;
     const filter = body?.filter;
 
+    // Check if collection exists first - if not, return success with 0 deleted
+    // This makes the API more forgiving for clients that try to clean up
+    // points before collections are created (e.g., RooCode's QdrantVectorStore)
+    const collection = await store.getCollection(collectionName);
+    if (!collection) {
+      return sendJson(res, 200, {
+        result: { operation_id: 0, status: "completed" },
+        status: "ok",
+        time: 0,
+      });
+    }
+
     try {
       let deletedCount = 0;
 
