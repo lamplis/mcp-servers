@@ -46,15 +46,20 @@ export async function startQdrantHttpServer(
     server.once("error", reject);
     server.listen(port, host, () => {
       server.off("error", reject);
-      logger(`[fake-qdrant] HTTP shim listening on http://${host}:${port}`);
       resolve();
     });
   });
 
+  // Get the actual port (important when port 0 is used for dynamic assignment)
+  const address = server.address();
+  const actualPort = typeof address === "object" && address ? address.port : port;
+  
+  logger(`[fake-qdrant] HTTP shim listening on http://${host}:${actualPort}`);
+
   return {
     server,
     host,
-    port,
+    port: actualPort,
     close: () =>
       new Promise<void>((resolve, reject) => {
         server.close((error) => {
@@ -77,6 +82,11 @@ async function handleRequest(
     return sendJson(res, 200, {});
   }
   const url = new URL(req.url ?? "/", "http://localhost");
+  
+  // Debug logging for delete requests
+  if (req.method === "POST" && url.pathname.includes("/points/delete")) {
+    console.error(`[fake-qdrant] DELETE request: ${req.method} ${url.pathname}`);
+  }
 
   if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/healthz")) {
     return sendJson(res, 200, { status: "ok" });
@@ -220,6 +230,104 @@ async function handleRequest(
         scoreThreshold: Number.isFinite(scoreThreshold) ? scoreThreshold : 0,
       });
       return sendJson(res, 200, { result: results, status: "ok", time: 0 });
+    } catch (error) {
+      return sendJson(res, 400, {
+        status: { error: error instanceof Error ? error.message : String(error) },
+      });
+    }
+  }
+
+  if (req.method === "POST" && remainder === "/points/delete") {
+    const body = await readJsonBody(req);
+    const pointIds = body?.points;
+    const filter = body?.filter;
+
+    try {
+      let deletedCount = 0;
+
+      if (Array.isArray(pointIds) && pointIds.length > 0) {
+        // Delete by point IDs
+        deletedCount = await store.deletePoints(collectionName, pointIds);
+      } else if (filter) {
+        // Delete by filter (e.g., file path in payload)
+        // Support Qdrant filter format: { must: [{ key: "path", match: { value: "..." } }] }
+        const filterFn = (payload: unknown): boolean => {
+          if (!payload || typeof payload !== "object") {
+            return false;
+          }
+          const p = payload as Record<string, unknown>;
+          
+          // Helper to get nested value by key path
+          const getNestedValue = (obj: unknown, keyPath: string): unknown => {
+            const keys = keyPath.split(".");
+            let value: unknown = obj;
+            for (const key of keys) {
+              if (value && typeof value === "object" && key in value) {
+                value = (value as Record<string, unknown>)[key];
+              } else {
+                return undefined;
+              }
+            }
+            return value;
+          };
+          
+          // Support filter.must (all conditions must match)
+          if (Array.isArray(filter.must)) {
+            for (const condition of filter.must) {
+              if (condition.key && condition.match) {
+                const value = getNestedValue(p, condition.key);
+                if (value === undefined) {
+                  return false; // Key path doesn't exist
+                }
+                // Match value
+                if (condition.match.value !== undefined) {
+                  const matchValue = condition.match.value;
+                  if (String(value) !== String(matchValue)) {
+                    return false; // Value doesn't match
+                  }
+                }
+              }
+            }
+            return true; // All must conditions passed
+          }
+          
+          // Support filter.should (at least one condition must match)
+          if (Array.isArray(filter.should)) {
+            for (const condition of filter.should) {
+              if (condition.key && condition.match) {
+                const value = getNestedValue(p, condition.key);
+                if (value !== undefined && condition.match.value !== undefined) {
+                  if (String(value) === String(condition.match.value)) {
+                    return true; // At least one should condition passed
+                  }
+                }
+              }
+            }
+            return false; // No should conditions matched
+          }
+          
+          // Support direct key-value matching (legacy format)
+          if (filter.key && filter.match) {
+            const value = getNestedValue(p, filter.key);
+            if (value !== undefined && filter.match.value !== undefined) {
+              return String(value) === String(filter.match.value);
+            }
+          }
+          
+          return false;
+        };
+        deletedCount = await store.deletePoints(collectionName, undefined, filterFn);
+      } else {
+        return sendJson(res, 400, {
+          status: { error: "missing points[] or filter" },
+        });
+      }
+
+      return sendJson(res, 200, {
+        result: { operation_id: 0, status: "completed" },
+        status: "ok",
+        time: 0,
+      });
     } catch (error) {
       return sendJson(res, 400, {
         status: { error: error instanceof Error ? error.message : String(error) },
