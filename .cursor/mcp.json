@@ -5,24 +5,28 @@
       "url": "https://modelcontextprotocol.io/mcp"
     },
     "central-memory": {
-      "type": "sse",
-      "url": "http://localhost:3300/memory/sse"
+      "command": "npx",
+      "args": ["tsx", "src/memory/index.ts"]
     },
     "central-filesystem": {
-      "type": "sse",
-      "url": "http://localhost:3300/filesystem/sse"
+      "command": "npx",
+      "args": ["tsx", "src/filesystem/index.ts", "C:/DEVHOME"]
     },
     "central-everything": {
-      "type": "sse",
-      "url": "http://localhost:3300/everything/sse"
+      "command": "npx",
+      "args": ["tsx", "src/everything/index.ts", "stdio"]
     },
     "central-sequentialthinking": {
-      "type": "sse",
-      "url": "http://localhost:3300/sequentialthinking/sse"
+      "command": "npx",
+      "args": ["tsx", "src/sequentialthinking/index.ts"]
     },
     "central-fake-qdrant": {
-      "type": "sse",
-      "url": "http://localhost:3300/fake-qdrant/sse"
+      "command": "npx",
+      "args": ["tsx", "src/fake-qdrant/index.ts"],
+      "env": {
+        "FAKE_QDRANT_ENABLED": "1",
+        "FAKE_QDRANT_HTTP_PORT": "6333"
+      }
     }
   }
 }
