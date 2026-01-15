@@ -1,0 +1,59 @@
+# MCP Server Usage Rules (RooCode/Cursor)
+
+Use these rules to maximize the MCP servers in this repo.
+
+## General Rules
+
+- Prefer MCP tools over web searches when docs are indexed.
+- Persist important findings using the memory server.
+- Use filesystem MCP for safe file operations outside the workspace.
+
+## MCP Servers
+
+### central-docsearch
+
+**Purpose:** Hybrid semantic + keyword search across indexed documentation.
+
+**Use when:** The user asks about APIs, reference material, or docs that might be indexed.
+
+**Tools:**
+- `doc-search` (query, topK, mode, source, latest)
+- `doc-ingest` (source, force)
+- `doc-ingest-status` (detailed)
+
+**Query tips:**
+- If the user asks for latest/newest info, use `latest: true`.
+- Avoid dots in versions: use `TypeScript 5 9` (not `5.9`).
+- Use `mode: "keyword"` for exact matches.
+- Increase `topK` to 10-15 for broad topics.
+
+### central-memory
+
+**Purpose:** Persistent knowledge graph across sessions.
+
+**Use when:** The user mentions long-lived context, decisions, or facts to remember.
+
+**Tools:**
+- `create_entities`, `create_relations`, `add_observations`
+- `search_nodes`, `open_nodes`
+
+### central-filesystem
+
+**Purpose:** Safe file operations outside the workspace.
+
+**Use when:** Accessing files beyond the repo or user paths.
+
+**Tools:**
+- `read_file`, `write_file`, `edit_file`, `list_directory`, `directory_tree`
+
+### central-sequentialthinking
+
+**Purpose:** Step-by-step reasoning for complex problems.
+
+**Use when:** Debugging, architecture, or multi-step decisions.
+
+### central-fake-qdrant
+
+**Purpose:** Local Qdrant-compatible vector DB.
+
+**Use when:** Storing/searching embeddings.

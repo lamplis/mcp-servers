@@ -1,0 +1,61 @@
+{
+  "mcpServers": {
+    "central-memory": {
+      "$comment": "Knowledge graph memory server",
+      "command": "npx",
+      "args": ["tsx", "src/memory/index.ts"],
+      "cwd": "<MCP_SERVERS_PATH>",
+      "disabled": false,
+      "alwaysAllow": []
+    },
+    "central-filesystem": {
+      "$comment": "Filesystem server - set the allowed root directory",
+      "command": "npx",
+      "args": ["tsx", "src/filesystem/index.ts", "<ALLOWED_PATH>"],
+      "cwd": "<MCP_SERVERS_PATH>",
+      "disabled": false,
+      "alwaysAllow": []
+    },
+    "central-docsearch": {
+      "$comment": "Document search with hybrid semantic+keyword search",
+      "command": "npx",
+      "args": ["tsx", "src/docsearch/index.ts"],
+      "cwd": "<MCP_SERVERS_PATH>",
+      "env": {
+        "OPENAI_API_KEY": "${OPENAI_API_KEY}",
+        "DOCSEARCH_DATA_DIR": "<PROJECT_PATH>\\.roo\\docsearch-data"
+      },
+      "disabled": false,
+      "alwaysAllow": ["doc-search", "doc-ingest", "doc-ingest-status"]
+    },
+    "central-sequentialthinking": {
+      "$comment": "Sequential thinking/reasoning server",
+      "command": "npx",
+      "args": ["tsx", "src/sequentialthinking/index.ts"],
+      "cwd": "<MCP_SERVERS_PATH>",
+      "disabled": false,
+      "alwaysAllow": []
+    },
+    "central-fake-qdrant": {
+      "$comment": "Local Qdrant-compatible vector database",
+      "command": "npx",
+      "args": ["tsx", "src/fake-qdrant/index.ts"],
+      "cwd": "<MCP_SERVERS_PATH>",
+      "env": {
+        "FAKE_QDRANT_ENABLED": "1",
+        "FAKE_QDRANT_HTTP_PORT": "6333"
+      },
+      "disabled": false,
+      "alwaysAllow": [
+        "fake_qdrant_list_collections",
+        "fake_qdrant_get_collection",
+        "fake_qdrant_create_collection",
+        "fake_qdrant_delete_collection",
+        "fake_qdrant_upsert_points",
+        "fake_qdrant_query_points",
+        "fake_qdrant_compact_collection",
+        "fake_qdrant_persist_indexes"
+      ]
+    }
+  }
+}

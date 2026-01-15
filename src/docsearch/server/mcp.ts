@@ -31,6 +31,7 @@ interface SearchToolInput {
   readonly repo?: string | undefined;
   readonly pathPrefix?: string | undefined;
   readonly mode?: SearchMode | undefined;
+  readonly latest?: boolean | undefined;
   readonly output?: OutputFormat | undefined;
   readonly includeImages?: boolean | undefined;
   readonly imagesOnly?: boolean | undefined;
@@ -89,7 +90,8 @@ server.registerTool(
   'doc-search',
   {
     title: 'Search indexed docs',
-    description: 'Hybrid semantic+keyword search across local files, URLs, and Confluence',
+    description:
+      'Hybrid semantic+keyword search across local files, URLs, and Confluence. Set latest=true to prioritize recent docs.',
     inputSchema: {
       query: z.string(),
       topK: z.number().int().min(1).max(50).optional(),
@@ -97,6 +99,7 @@ server.registerTool(
       repo: z.string().optional(),
       pathPrefix: z.string().optional(),
       mode: z.enum(['auto', 'vector', 'keyword']).optional(),
+      latest: z.boolean().optional(),
       output: z.enum(['text', 'json', 'yaml']).optional(),
       includeImages: z.boolean().optional(),
       imagesOnly: z.boolean().optional(),
@@ -112,7 +115,7 @@ server.registerTool(
       reason: 'vector' as const, // performSearch handles both modes internally
     }));
 
-    const items = results.slice(0, input.topK ?? 8);
+    const items = results.slice(0, input.topK ?? 15);
 
     // Handle output formatting if requested
     if (input.output) {
