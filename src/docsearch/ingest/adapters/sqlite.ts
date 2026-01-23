@@ -391,6 +391,7 @@ export class SqliteAdapter implements DatabaseAdapter {
         from chunks_fts
         join chunks c on c.id = chunks_fts.rowid
         where chunks_fts match @query
+        order by score asc
         limit @k
       )
       select kw.chunk_id, kw.score, d.id as document_id, d.source, d.uri, d.repo, d.path, d.title,
@@ -399,6 +400,7 @@ export class SqliteAdapter implements DatabaseAdapter {
       join chunks c on c.id = kw.chunk_id
       join documents d on d.id = c.document_id
       where 1=1 ${filterSql}
+      order by kw.score asc
       limit @k
     `;
 
@@ -442,6 +444,7 @@ export class SqliteAdapter implements DatabaseAdapter {
         select rowid, distance
         from vec_chunks
         where embedding match @embedding and k = @k
+        order by distance asc
       )
       select m.chunk_id as chunk_id, vec.distance as score, d.id as document_id, d.source, d.uri, d.repo, d.path, d.title,
              d.mtime, c.start_line, c.end_line, substr(c.content, 1, 400) as snippet, d.extra_json
@@ -450,6 +453,7 @@ export class SqliteAdapter implements DatabaseAdapter {
       join chunks c on c.id = m.chunk_id
       join documents d on d.id = c.document_id
       where 1=1 ${filterSql}
+      order by vec.distance asc
       limit @k
     `;
 

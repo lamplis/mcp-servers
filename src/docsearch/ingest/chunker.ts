@@ -7,6 +7,7 @@ export interface Chunk {
 
 const CODE_MAX_CHARS = 1400;
 const CODE_MIN_CHARS = 700;
+const CODE_OVERLAP_LINES = 3;
 const DOC_MAX_CHARS = 1200;
 const DOC_OVERLAP = 150;
 
@@ -16,7 +17,7 @@ export function chunkCode(text: string): readonly Chunk[] {
   }
 
   const lines = text.split(/\r?\n/);
-  const chunks: Chunk[] = [];
+  const ranges: Array<{ start: number; end: number }> = [];
   let start = 0;
 
   while (start < lines.length) {
@@ -66,19 +67,24 @@ export function chunkCode(text: string): readonly Chunk[] {
 
     // Add chunk if we have content
     if (hasContent && acc.trim()) {
-      chunks.push({
-        content: acc,
-        startLine: start + 1,
-        endLine: end,
-        tokenCount: approxTokens(acc),
-      });
+      ranges.push({ start, end });
     }
 
     // Ensure we always make progress
     start = Math.max(start + 1, end);
   }
 
-  return chunks;
+  return ranges.map((range, index) => {
+    const overlapStart =
+      index === 0 ? range.start : Math.max(0, range.start - CODE_OVERLAP_LINES);
+    const content = lines.slice(overlapStart, range.end).join('\n');
+    return {
+      content,
+      startLine: overlapStart + 1,
+      endLine: range.end,
+      tokenCount: approxTokens(content),
+    };
+  });
 }
 
 export function chunkDoc(text: string): readonly Chunk[] {
@@ -121,6 +127,23 @@ export function chunkPdf(text: string): readonly Chunk[] {
     .trim();
 
   return chunkDoc(cleanedText);
+}
+
+export function addChunkHeader(chunks: readonly Chunk[], header: string): readonly Chunk[] {
+  const trimmedHeader = header.trim();
+  if (!trimmedHeader) {
+    return chunks;
+  }
+
+  const prefix = `${trimmedHeader}\n\n`;
+  return chunks.map((chunk) => {
+    const content = `${prefix}${chunk.content}`;
+    return {
+      ...chunk,
+      content,
+      tokenCount: approxTokens(content),
+    };
+  });
 }
 
 function approxTokens(text: string): number {

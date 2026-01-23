@@ -1,7 +1,7 @@
 import path from 'node:path';
 
 import { ChangeTracker, type ChunkChange } from './change-tracker.js';
-import { chunkCode, chunkDoc, chunkPdf } from './chunker.js';
+import { addChunkHeader, chunkCode, chunkDoc, chunkPdf } from './chunker.js';
 import { sha256 } from './hash.js';
 import { Indexer } from './indexer.js';
 
@@ -68,7 +68,7 @@ export class IncrementalIndexer extends Indexer {
     const existingChunks = await this.incrementalAdapter.getDocumentChunks(existingDoc.id);
     const affectedChunkIds = ChangeTracker.identifyAffectedChunks(changedLines, existingChunks);
 
-    const newChunks = this.chunkContent(fileContent, filePath);
+    const newChunks = this.chunkContent(fileContent, documentMetadata);
     const chunkChanges = ChangeTracker.computeChunkChanges(
       existingChunks,
       newChunks.map((chunk) => ({
@@ -102,7 +102,7 @@ export class IncrementalIndexer extends Indexer {
     startTime: number,
   ): Promise<IncrementalIndexResult> {
     const docId = await this.upsertDocument({ ...metadata, hash } as DocumentInput);
-    const chunks = this.chunkContent(content, (metadata.path as string) || '');
+    const chunks = this.chunkContent(content, metadata);
     await this.insertChunks(docId, chunks);
     await this.storeContent(metadata.uri as string, content);
 
@@ -125,7 +125,7 @@ export class IncrementalIndexer extends Indexer {
   ): Promise<IncrementalIndexResult> {
     await this.incrementalAdapter.deleteDocumentChunks(documentId);
 
-    const chunks = this.chunkContent(content, (metadata.path as string) || '');
+    const chunks = this.chunkContent(content, metadata);
     await this.insertChunks(documentId, chunks);
     await this.updateDocumentHash(documentId, hash);
     await this.storeContent(metadata.uri as string, content);
@@ -190,11 +190,13 @@ export class IncrementalIndexer extends Indexer {
     return { added, modified, deleted };
   }
 
-  private chunkContent(content: string, filePath: string): ChunkInput[] {
+  private chunkContent(content: string, metadata: Omit<DocumentInput, 'hash'>): ChunkInput[] {
+    const filePath = (metadata.path as string) || '';
     const ext = path.extname(filePath).toLowerCase();
+    const header = buildChunkHeader(metadata);
 
     if (ext === '.pdf') {
-      return [...chunkPdf(content)];
+      return [...addChunkHeader(chunkPdf(content), header)];
     }
 
     const CODE_EXT = new Set([
@@ -217,10 +219,10 @@ export class IncrementalIndexer extends Indexer {
     const DOC_EXT = new Set(['.md', '.mdx', '.txt', '.rst', '.adoc', '.yaml', '.yml', '.json']);
 
     if (CODE_EXT.has(ext) || !DOC_EXT.has(ext)) {
-      return [...chunkCode(content)];
+      return [...addChunkHeader(chunkCode(content), header)];
     }
 
-    return [...chunkDoc(content)];
+    return [...addChunkHeader(chunkDoc(content), header)];
   }
 
   private async getOldContent(uri: string): Promise<string | null> {
@@ -237,4 +239,11 @@ export class IncrementalIndexer extends Indexer {
   private async updateDocumentHash(documentId: number, hash: string): Promise<void> {
     await this.incrementalAdapter.updateDocumentHash(documentId, hash);
   }
+}
+
+function buildChunkHeader(metadata: Omit<DocumentInput, 'hash'>): string {
+  const title = (metadata.title as string) || (metadata.path as string) || (metadata.uri as string);
+  const repoPart = metadata.repo ? ` repo=${metadata.repo}` : '';
+  const pathPart = metadata.path ? ` path=${metadata.path}` : '';
+  return `# ${title}\n> source=${metadata.source}${repoPart}${pathPart} uri=${metadata.uri}`;
 }

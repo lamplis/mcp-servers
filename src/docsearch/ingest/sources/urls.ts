@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import TurndownService from 'turndown';
 
 import { CONFIG } from '../../shared/config.js';
-import { chunkDoc } from '../chunker.js';
+import { addChunkHeader, chunkDoc } from '../chunker.js';
 import { sha256 } from '../hash.js';
 import { Indexer } from '../indexer.js';
 
@@ -469,7 +469,12 @@ export async function ingestUrls(adapter: DatabaseAdapter, force = false): Promi
             // Insert chunks if needed
             const hasChunks = await adapter.hasChunks(docId);
             if (!hasChunks) {
-              const chunks = chunkDoc(page.content);
+              const header = buildChunkHeader({
+                title: page.title || page.url,
+                source: 'url',
+                uri: page.url,
+              });
+              const chunks = addChunkHeader(chunkDoc(page.content), header);
               await indexer.insertChunks(docId, chunks);
               console.info(`[index] Indexed ${page.url}: ${chunks.length} chunks`);
             }
@@ -486,4 +491,8 @@ export async function ingestUrls(adapter: DatabaseAdapter, force = false): Promi
       console.error('Error reading urls.md:', error);
     }
   }
+}
+
+function buildChunkHeader(metadata: { title: string; source: string; uri: string }): string {
+  return `# ${metadata.title}\n> source=${metadata.source} uri=${metadata.uri}`;
 }

@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import TurndownService from 'turndown';
 
 import { CONFIG } from '../../shared/config.js';
-import { chunkDoc } from '../chunker.js';
+import { addChunkHeader, chunkDoc } from '../chunker.js';
 import { Indexer } from '../indexer.js';
 
 import type { DatabaseAdapter } from '../adapters/index.js';
@@ -250,7 +250,9 @@ export async function ingestConfluence(adapter: DatabaseAdapter) {
 
           const hasChunks = await adapter.hasChunks(docId);
           if (!hasChunks) {
-            await indexer.insertChunks(docId, chunkDoc(md));
+            const header = buildChunkHeader({ title, source: 'confluence', uri });
+            const chunks = addChunkHeader(chunkDoc(md), header);
+            await indexer.insertChunks(docId, chunks);
           }
 
           processedCount++;
@@ -327,7 +329,9 @@ export async function ingestConfluence(adapter: DatabaseAdapter) {
 
           const hasChunks = await adapter.hasChunks(docId);
           if (!hasChunks) {
-            await indexer.insertChunks(docId, chunkDoc(md));
+            const header = buildChunkHeader({ title, source: 'confluence', uri });
+            const chunks = addChunkHeader(chunkDoc(md), header);
+            await indexer.insertChunks(docId, chunks);
           }
 
           processedCount++;
@@ -366,4 +370,8 @@ function sha256(txt: string) {
   const h = createHash('sha256');
   h.update(txt);
   return h.digest('hex');
+}
+
+function buildChunkHeader(metadata: { title: string; source: string; uri: string }): string {
+  return `# ${metadata.title}\n> source=${metadata.source} uri=${metadata.uri}`;
 }

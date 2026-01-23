@@ -5,7 +5,7 @@ import path from 'node:path';
 import fg from 'fast-glob';
 
 import { CONFIG } from '../../shared/config.js';
-import { chunkCode, chunkDoc, chunkPdf } from '../chunker.js';
+import { addChunkHeader, chunkCode, chunkDoc, chunkPdf } from '../chunker.js';
 import { sha256 } from '../hash.js';
 import { getImageToTextProvider } from '../image-to-text.js';
 import { Indexer } from '../indexer.js';
@@ -150,12 +150,21 @@ export async function ingestFiles(adapter: DatabaseAdapter) {
         const rel = path.relative(process.cwd(), abs);
         const uri = `file://${abs}`;
         const stat = await fs.stat(abs);
+        const title = getTitle(abs);
+        const repo = guessRepo(abs);
+        const header = buildChunkHeader({
+          title,
+          source: 'file',
+          repo,
+          location: rel,
+          uri,
+        });
         const docId = await indexer.upsertDocument({
           source: 'file',
           uri,
-          repo: guessRepo(abs),
+          repo,
           path: rel,
-          title: getTitle(abs),
+          title,
           lang: getLanguage(abs),
           hash,
           mtime: stat.mtimeMs,
@@ -174,8 +183,6 @@ export async function ingestFiles(adapter: DatabaseAdapter) {
             chunks = [
               {
                 content,
-                startLine: undefined,
-                endLine: undefined,
               },
             ];
           } else if (isCode(abs) || (!isDoc(abs) && !isPdf(abs))) {
@@ -183,7 +190,8 @@ export async function ingestFiles(adapter: DatabaseAdapter) {
           } else {
             chunks = chunkDoc(content);
           }
-          await indexer.insertChunks(docId, chunks);
+          const enrichedChunks = addChunkHeader(chunks, header);
+          await indexer.insertChunks(docId, enrichedChunks);
         }
       } catch (e) {
         if (process.env.NODE_ENV !== 'test') {
@@ -207,4 +215,16 @@ function guessRepo(absPath: string): string | null {
     dir = path.dirname(dir);
   }
   return null;
+}
+
+function buildChunkHeader(metadata: {
+  title: string;
+  source: string;
+  repo: string | null;
+  location: string | null;
+  uri: string;
+}): string {
+  const repoPart = metadata.repo ? ` repo=${metadata.repo}` : '';
+  const locationPart = metadata.location ? ` path=${metadata.location}` : '';
+  return `# ${metadata.title}\n> source=${metadata.source}${repoPart}${locationPart} uri=${metadata.uri}`;
 }

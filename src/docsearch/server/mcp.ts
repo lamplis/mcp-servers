@@ -8,6 +8,7 @@ import { z } from 'zod';
 
 import { getDatabase } from '../ingest/database.js';
 import { performSearch } from '../ingest/search.js';
+import { rerankResults } from '../ingest/reranker.js';
 import { registerIngestTools } from './tools/ingest-tools.js';
 import { FormatterFactory } from '../cli/adapters/output/formatter-factory.js';
 import { CONFIG } from '../shared/config.js';
@@ -32,6 +33,7 @@ interface SearchToolInput {
   readonly pathPrefix?: string | undefined;
   readonly mode?: SearchMode | undefined;
   readonly latest?: boolean | undefined;
+  readonly rerank?: boolean | undefined;
   readonly output?: OutputFormat | undefined;
   readonly includeImages?: boolean | undefined;
   readonly imagesOnly?: boolean | undefined;
@@ -100,6 +102,7 @@ server.registerTool(
       pathPrefix: z.string().optional(),
       mode: z.enum(['auto', 'vector', 'keyword']).optional(),
       latest: z.boolean().optional(),
+      rerank: z.boolean().optional(),
       output: z.enum(['text', 'json', 'yaml']).optional(),
       includeImages: z.boolean().optional(),
       imagesOnly: z.boolean().optional(),
@@ -107,7 +110,10 @@ server.registerTool(
   },
   async (input: SearchToolInput) => {
     const adapter = await getDatabase();
-    const searchResults = await performSearch(adapter, input as SearchParams);
+    let searchResults = await performSearch(adapter, input as SearchParams);
+    if (input.rerank) {
+      searchResults = await rerankResults(input.query, searchResults);
+    }
 
     // Convert adapter results to our SearchResult format
     const results: SearchResult[] = searchResults.map((r) => ({
