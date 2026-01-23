@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import dotenv from 'dotenv';
 
-type EmbeddingsProvider = 'openai' | 'tei';
+type EmbeddingsProvider = 'local' | 'openai' | 'tei';
 type ConfluenceAuthMethod = 'basic' | 'bearer';
 
 interface AppConfig {
@@ -18,6 +18,11 @@ interface AppConfig {
   readonly OPENAI_EMBED_MODEL: string;
   readonly OPENAI_EMBED_DIM: number;
   readonly TEI_ENDPOINT: string;
+
+  // Local embeddings configuration
+  readonly LOCAL_EMBED_MODEL: string;
+  readonly LOCAL_EMBED_DIM: number;
+  readonly LOCAL_MODEL_CACHE_DIR: string;
 
   // Image processing (optional)
   readonly ENABLE_IMAGE_TO_TEXT: boolean;
@@ -49,10 +54,10 @@ function splitCsv(v: string | undefined, def: string): readonly string[] {
 }
 
 function validateEmbeddingsProvider(provider: string): EmbeddingsProvider {
-  if (provider === 'openai' || provider === 'tei') {
+  if (provider === 'local' || provider === 'openai' || provider === 'tei') {
     return provider;
   }
-  return 'openai';
+  return 'local';
 }
 
 function validateConfluenceAuthMethod(method: string): ConfluenceAuthMethod {
@@ -83,12 +88,17 @@ function initializeConfig(): AppConfig {
       DB_PATH: dbPath,
 
       // Embeddings
-      EMBEDDINGS_PROVIDER: validateEmbeddingsProvider(process.env.EMBEDDINGS_PROVIDER || 'openai'),
+      EMBEDDINGS_PROVIDER: validateEmbeddingsProvider(process.env.EMBEDDINGS_PROVIDER || 'local'),
       OPENAI_API_KEY: process.env.OPENAI_API_KEY || '',
       OPENAI_BASE_URL: process.env.OPENAI_BASE_URL || '',
       OPENAI_EMBED_MODEL: process.env.OPENAI_EMBED_MODEL || 'text-embedding-3-small',
       OPENAI_EMBED_DIM: parseInt(process.env.OPENAI_EMBED_DIM || '1536', 10),
       TEI_ENDPOINT: process.env.TEI_ENDPOINT || '',
+
+      // Local embeddings
+      LOCAL_EMBED_MODEL: process.env.LOCAL_EMBED_MODEL || 'Xenova/all-MiniLM-L6-v2',
+      LOCAL_EMBED_DIM: parseInt(process.env.LOCAL_EMBED_DIM || '384', 10),
+      LOCAL_MODEL_CACHE_DIR: process.env.LOCAL_MODEL_CACHE_DIR || './model-cache',
 
       // Image processing
       ENABLE_IMAGE_TO_TEXT: process.env.ENABLE_IMAGE_TO_TEXT === 'true',

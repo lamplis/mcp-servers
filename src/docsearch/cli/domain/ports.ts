@@ -52,7 +52,12 @@ export interface ConfigurationProvider {
 
 export interface Configuration {
   readonly embeddings: {
-    readonly provider: 'openai' | 'tei';
+    readonly provider: 'local' | 'openai' | 'tei';
+    readonly local: {
+      readonly model: string;
+      readonly dimension: number;
+      readonly cacheDir: string;
+    };
     readonly openai: {
       readonly apiKey: string;
       readonly baseUrl: string;

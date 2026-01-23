@@ -1,50 +1,43 @@
 {
   "mcpServers": {
     "central-memory": {
-      "$comment": "Knowledge graph memory server for persistent storage across sessions",
+      "$comment": "Auto-start: Knowledge graph memory server",
       "command": "npx",
       "args": ["tsx", "src/memory/index.ts"],
-      "cwd": "<MCP_SERVERS_PATH>",
+      "cwd": "C:\\DEVHOME\\GITHUB\\mcp-servers",
       "disabled": false,
       "alwaysAllow": []
     },
     "central-filesystem": {
-      "$comment": "Filesystem server - replace <ALLOWED_PATH> with directories you want to access",
+      "$comment": "Auto-start: Filesystem server with access to DEVHOME",
       "command": "npx",
-      "args": ["tsx", "src/filesystem/index.ts", "<ALLOWED_PATH>"],
-      "cwd": "<MCP_SERVERS_PATH>",
+      "args": ["tsx", "src/filesystem/index.ts", "C:\\DEVHOME"],
+      "cwd": "C:\\DEVHOME\\GITHUB\\mcp-servers",
       "disabled": false,
       "alwaysAllow": []
     },
-    "central-docsearch": {
-      "$comment": "Document search with hybrid semantic+keyword search. Requires OPENAI_API_KEY.",
+    "central-everything": {
+      "$comment": "Auto-start: MCP demo/test server with all capabilities",
       "command": "npx",
-      "args": ["tsx", "src/docsearch/index.ts"],
-      "cwd": "<MCP_SERVERS_PATH>",
-      "env": {
-        "OPENAI_API_KEY": "<YOUR_OPENAI_API_KEY>",
-        "DOCSEARCH_DATA_DIR": "<YOUR_PROJECT_PATH>\\.roo\\docsearch-data"
-      },
+      "args": ["tsx", "src/everything/index.ts", "stdio"],
+      "cwd": "C:\\DEVHOME\\GITHUB\\mcp-servers",
       "disabled": false,
-      "alwaysAllow": []
+      "alwaysAllow": ["get-env"]
     },
     "central-sequentialthinking": {
-      "$comment": "Sequential thinking/reasoning server for complex problem solving",
+      "$comment": "Auto-start: Sequential thinking/reasoning server",
       "command": "npx",
       "args": ["tsx", "src/sequentialthinking/index.ts"],
-      "cwd": "<MCP_SERVERS_PATH>",
+      "cwd": "C:\\DEVHOME\\GITHUB\\mcp-servers",
       "disabled": false,
       "alwaysAllow": []
     },
     "central-fake-qdrant": {
-      "$comment": "Local Qdrant-compatible vector database",
+      "$comment": "Auto-start: Fake Qdrant vector DB with optional HTTP shim on port 6333",
       "command": "npx",
       "args": ["tsx", "src/fake-qdrant/index.ts"],
-      "cwd": "<MCP_SERVERS_PATH>",
-      "env": {
-        "FAKE_QDRANT_ENABLED": "1",
-        "FAKE_QDRANT_HTTP_PORT": "6333"
-      },
+      "cwd": "C:\\DEVHOME\\GITHUB\\mcp-servers",
+      "env": { "FAKE_QDRANT_ENABLED": "1", "FAKE_QDRANT_HTTP_PORT": "6333" },
       "disabled": false,
       "alwaysAllow": [
         "fake_qdrant_list_collections",
@@ -57,13 +50,25 @@
         "fake_qdrant_persist_indexes"
       ]
     },
-    "central-everything": {
-      "$comment": "Demo/test server with all MCP capabilities (optional)",
+    "central-docsearch": {
+      "$comment": "Auto-start: Document search with local embeddings (offline-first, no API key required)",
       "command": "npx",
-      "args": ["tsx", "src/everything/index.ts", "stdio"],
-      "cwd": "<MCP_SERVERS_PATH>",
-      "disabled": true,
-      "alwaysAllow": []
+      "args": ["tsx", "src/docsearch/index.ts"],
+      "cwd": "C:\\DEVHOME\\GITHUB\\mcp-servers",
+      "env": {
+        "EMBEDDINGS_PROVIDER": "local",
+        "DOCSEARCH_DATA_DIR": "C:\\DEVHOME\\GITHUB\\Joomla-1.0\\.roo\\docsearch-data"
+      },
+      "disabled": false,
+      "alwaysAllow": ["doc-search", "doc-ingest", "doc-ingest-status"]
+    },
+    "central-local-embeddings": {
+      "$comment": "Auto-start: Local/offline text embeddings using Transformers.js (model cached in ./model-cache)",
+      "command": "npx",
+      "args": ["tsx", "src/local-embeddings/index.ts"],
+      "cwd": "C:\\DEVHOME\\GITHUB\\mcp-servers",
+      "disabled": false,
+      "alwaysAllow": ["embeddings", "prefetch_model", "health"]
     }
   }
 }

@@ -17,12 +17,12 @@
       "alwaysAllow": []
     },
     "central-docsearch": {
-      "$comment": "Document search with hybrid semantic+keyword search",
+      "$comment": "Document search with local embeddings (offline-first, no API key required)",
       "command": "npx",
       "args": ["tsx", "src/docsearch/index.ts"],
       "cwd": "<MCP_SERVERS_PATH>",
       "env": {
-        "OPENAI_API_KEY": "${OPENAI_API_KEY}",
+        "EMBEDDINGS_PROVIDER": "local",
         "DOCSEARCH_DATA_DIR": "<PROJECT_PATH>\\.roo\\docsearch-data"
       },
       "disabled": false,
@@ -56,6 +56,14 @@
         "fake_qdrant_compact_collection",
         "fake_qdrant_persist_indexes"
       ]
+    },
+    "central-local-embeddings": {
+      "$comment": "Local/offline text embeddings using Transformers.js",
+      "command": "npx",
+      "args": ["tsx", "src/local-embeddings/index.ts"],
+      "cwd": "<MCP_SERVERS_PATH>",
+      "disabled": false,
+      "alwaysAllow": ["embeddings", "prefetch_model", "health"]
     }
   }
 }

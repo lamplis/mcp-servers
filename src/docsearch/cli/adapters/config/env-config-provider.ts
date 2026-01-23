@@ -8,6 +8,9 @@ import type { Configuration, ConfigurationProvider } from '../../domain/ports.js
 export interface ConfigOverrides {
   readonly configFile?: string;
   readonly embeddingsProvider?: string;
+  readonly localEmbedModel?: string;
+  readonly localEmbedDim?: string;
+  readonly localModelCacheDir?: string;
   readonly openaiApiKey?: string;
   readonly openaiBaseUrl?: string;
   readonly openaiEmbedModel?: string;
@@ -58,8 +61,22 @@ export class EnvConfigProvider implements ConfigurationProvider {
     return {
       embeddings: {
         provider: this.validateEmbeddingsProvider(
-          this.overrides.embeddingsProvider || process.env.EMBEDDINGS_PROVIDER || 'openai',
+          this.overrides.embeddingsProvider || process.env.EMBEDDINGS_PROVIDER || 'local',
         ),
+        local: {
+          model:
+            this.overrides.localEmbedModel ||
+            process.env.LOCAL_EMBED_MODEL ||
+            'Xenova/all-MiniLM-L6-v2',
+          dimension: parseInt(
+            this.overrides.localEmbedDim || process.env.LOCAL_EMBED_DIM || '384',
+            10,
+          ),
+          cacheDir:
+            this.overrides.localModelCacheDir ||
+            process.env.LOCAL_MODEL_CACHE_DIR ||
+            './model-cache',
+        },
         openai: {
           apiKey: this.overrides.openaiApiKey || process.env.OPENAI_API_KEY || '',
           baseUrl: this.overrides.openaiBaseUrl || process.env.OPENAI_BASE_URL || '',
@@ -128,10 +145,10 @@ export class EnvConfigProvider implements ConfigurationProvider {
       .filter(Boolean);
   }
 
-  private validateEmbeddingsProvider(provider: string): 'openai' | 'tei' {
-    if (provider === 'openai' || provider === 'tei') {
+  private validateEmbeddingsProvider(provider: string): 'local' | 'openai' | 'tei' {
+    if (provider === 'local' || provider === 'openai' || provider === 'tei') {
       return provider;
     }
-    return 'openai';
+    return 'local';
   }
 }

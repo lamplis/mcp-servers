@@ -20,6 +20,11 @@ export default defineConfig({
       include: ['**/*.ts'],
       exclude: ['**/__tests__/**', '**/dist/**'],
     },
+    alias: {
+      // Fix test imports - test files incorrectly use ../src/ instead of ../
+      '../src/': '../',
+      '../../src/': '../../',
+    },
   },
   esbuild: {
     target: 'node18',

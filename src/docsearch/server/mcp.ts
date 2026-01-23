@@ -144,6 +144,11 @@ server.registerTool(
         },
         embeddings: {
           provider: CONFIG.EMBEDDINGS_PROVIDER,
+          local: {
+            model: CONFIG.LOCAL_EMBED_MODEL,
+            dimension: CONFIG.LOCAL_EMBED_DIM,
+            cacheDir: CONFIG.LOCAL_MODEL_CACHE_DIR,
+          },
           openai: {
             apiKey: CONFIG.OPENAI_API_KEY,
             baseUrl: CONFIG.OPENAI_BASE_URL,

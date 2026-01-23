@@ -29,16 +29,24 @@ describe('Configuration', () => {
       delete process.env.OPENAI_BASE_URL;
       delete process.env.OPENAI_EMBED_MODEL;
       delete process.env.OPENAI_EMBED_DIM;
+      delete process.env.LOCAL_EMBED_MODEL;
+      delete process.env.LOCAL_EMBED_DIM;
+      delete process.env.LOCAL_MODEL_CACHE_DIR;
       delete process.env.FILE_ROOTS;
       delete process.env.DB_PATH;
 
       const { CONFIG } = await import('../src/shared/config.js');
 
-      expect(CONFIG.EMBEDDINGS_PROVIDER).toBe('openai');
+      // Default provider is now 'local' for offline-first operation
+      expect(CONFIG.EMBEDDINGS_PROVIDER).toBe('local');
       expect(CONFIG.OPENAI_API_KEY).toBe(''); // Default empty string when no env var
       expect(CONFIG.OPENAI_BASE_URL).toBe(''); // Default empty string when no env var
       expect(CONFIG.OPENAI_EMBED_MODEL).toBe('text-embedding-3-small'); // Default from config
       expect(CONFIG.OPENAI_EMBED_DIM).toBe(1536); // Default from config
+      // Local embedding defaults
+      expect(CONFIG.LOCAL_EMBED_MODEL).toBe('Xenova/all-MiniLM-L6-v2');
+      expect(CONFIG.LOCAL_EMBED_DIM).toBe(384);
+      expect(CONFIG.LOCAL_MODEL_CACHE_DIR).toBe('./model-cache');
       expect(CONFIG.FILE_ROOTS).toEqual(['.']);
       expect(CONFIG.DB_PATH).toBe('./data/index.db');
     });
@@ -64,9 +72,10 @@ describe('Configuration', () => {
     });
 
     it('should validate embeddings provider', async () => {
+      // Invalid provider falls back to 'local' (the default)
       process.env.EMBEDDINGS_PROVIDER = 'invalid-provider';
       const { CONFIG } = await import('../src/shared/config.js');
-      expect(CONFIG.EMBEDDINGS_PROVIDER).toBe('openai');
+      expect(CONFIG.EMBEDDINGS_PROVIDER).toBe('local');
 
       vi.resetModules();
       process.env.EMBEDDINGS_PROVIDER = 'tei';
@@ -77,6 +86,23 @@ describe('Configuration', () => {
       process.env.EMBEDDINGS_PROVIDER = 'openai';
       const { CONFIG: CONFIG3 } = await import('../src/shared/config.js');
       expect(CONFIG3.EMBEDDINGS_PROVIDER).toBe('openai');
+
+      vi.resetModules();
+      process.env.EMBEDDINGS_PROVIDER = 'local';
+      const { CONFIG: CONFIG4 } = await import('../src/shared/config.js');
+      expect(CONFIG4.EMBEDDINGS_PROVIDER).toBe('local');
+    });
+
+    it('should parse local embedding configuration from environment', async () => {
+      process.env.LOCAL_EMBED_MODEL = 'Xenova/custom-model';
+      process.env.LOCAL_EMBED_DIM = '768';
+      process.env.LOCAL_MODEL_CACHE_DIR = '/custom/cache/path';
+
+      const { CONFIG } = await import('../src/shared/config.js');
+
+      expect(CONFIG.LOCAL_EMBED_MODEL).toBe('Xenova/custom-model');
+      expect(CONFIG.LOCAL_EMBED_DIM).toBe(768);
+      expect(CONFIG.LOCAL_MODEL_CACHE_DIR).toBe('/custom/cache/path');
     });
 
     it('should parse integer values correctly', async () => {
@@ -290,15 +316,21 @@ describe('Configuration', () => {
       const { CONFIG } = await import('../src/shared/config.js');
 
       // These should compile without errors
-      const provider: 'openai' | 'tei' = CONFIG.EMBEDDINGS_PROVIDER;
+      const provider: 'local' | 'openai' | 'tei' = CONFIG.EMBEDDINGS_PROVIDER;
       const apiKey: string = CONFIG.OPENAI_API_KEY;
       const dimension: number = CONFIG.OPENAI_EMBED_DIM;
+      const localModel: string = CONFIG.LOCAL_EMBED_MODEL;
+      const localDim: number = CONFIG.LOCAL_EMBED_DIM;
+      const localCacheDir: string = CONFIG.LOCAL_MODEL_CACHE_DIR;
       const spaces: readonly string[] = CONFIG.CONFLUENCE_SPACES;
       const roots: readonly string[] = CONFIG.FILE_ROOTS;
 
       expect(typeof provider).toBe('string');
       expect(typeof apiKey).toBe('string');
       expect(typeof dimension).toBe('number');
+      expect(typeof localModel).toBe('string');
+      expect(typeof localDim).toBe('number');
+      expect(typeof localCacheDir).toBe('string');
       expect(Array.isArray(spaces)).toBe(true);
       expect(Array.isArray(roots)).toBe(true);
     });

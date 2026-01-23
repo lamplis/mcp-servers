@@ -106,7 +106,40 @@ Restart VS Code or reload the window to activate the MCP servers.
 | `central-docsearch` | Documentation search (requires OpenAI key) |
 | `central-sequentialthinking` | Complex reasoning and problem-solving |
 | `central-fake-qdrant` | Local vector database |
+| `central-local-embeddings` | Local/offline text embeddings (no API key required) |
 | `central-everything` | Demo/test server (disabled by default) |
+
+## Local Embeddings Features
+
+The local-embeddings server provides fully offline text embeddings:
+
+- **No API Key Required**: Uses local Transformers.js models
+- **Offline Operation**: Works without network after initial model download
+- **Multiple Models**: Supports any Hugging Face sentence-transformer model
+- **Batch Processing**: Embed up to 64 texts per request
+- **Caching**: LRU cache reduces computation for repeated inputs
+
+### First-Time Setup
+
+Before using offline, prefetch the model (requires network):
+
+```
+Use prefetch_model to download the embedding model
+```
+
+### Using Local Embeddings
+
+Generate embeddings for text:
+
+```
+Use embeddings with input "Hello world"
+```
+
+Or batch multiple texts:
+
+```
+Use embeddings with input ["text 1", "text 2", "text 3"]
+```
 
 ## Docsearch Features
 
@@ -156,6 +189,12 @@ Use doc-search with query "API authentication"
 The memory server stores data in `memory.json` in the mcp-servers directory.
 Ensure the directory is writable.
 
+### Local embeddings model not found
+
+1. Run `prefetch_model` tool with network access first
+2. Verify `MODEL_CACHE_DIR` path is writable
+3. Check that the model files exist in the cache directory
+
 ## Environment Variables
 
 | Variable | Server | Description |
@@ -165,6 +204,10 @@ Ensure the directory is writable.
 | `DOCSEARCH_CRAWL_LIFETIME_DAYS` | docsearch | Days before re-crawl (default: 30) |
 | `FAKE_QDRANT_ENABLED` | fake-qdrant | Enable the server |
 | `FAKE_QDRANT_HTTP_PORT` | fake-qdrant | HTTP API port (default: 6333) |
+| `MODEL_ID` | local-embeddings | Default model (default: `Xenova/all-MiniLM-L6-v2`) |
+| `MODEL_CACHE_DIR` | local-embeddings | Model cache directory (default: `./model-cache`) |
+| `EMBED_CACHE_SIZE` | local-embeddings | LRU cache entries (default: 1000) |
+| `EMBED_CONCURRENCY` | local-embeddings | Max parallel jobs (default: 2) |
 
 ## File Structure
 
@@ -176,10 +219,12 @@ your-project/
 │   ├── mcp.json              # MCP server configuration
 │   ├── rules/
 │   │   └── mcp-servers.md    # AI instructions (optional)
-│   └── docsearch-data/       # Docsearch data (if using)
-│       ├── docs/             # Local files to index
-│       ├── urls.md           # URLs to crawl
-│       └── index.db          # SQLite database (auto-created)
+│   ├── docsearch-data/       # Docsearch data (if using)
+│   │   ├── docs/             # Local files to index
+│   │   ├── urls.md           # URLs to crawl
+│   │   └── index.db          # SQLite database (auto-created)
+│   └── model-cache/          # Local embeddings model cache (if using)
+│       └── Xenova/           # Downloaded model files
 └── ...
 ```
 

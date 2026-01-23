@@ -1,9 +1,10 @@
 # docsearch-mcp (Local Fork)
 
-100% local document search MCP server using SQLite + sqlite-vec. No Docker, no external databases, no cloud services required (except OpenAI API for embeddings).
+100% local document search MCP server using SQLite + sqlite-vec. No Docker, no external databases, no cloud services required. Fully offline after initial model download.
 
 ## Features
 
+- **Offline-First**: Uses local transformer models for embeddings - no API keys required
 - **Hybrid Search**: Combines full-text search (FTS5) with vector similarity for optimal results
 - **Multi-Source Indexing**: Local files, web pages (URLs), and Confluence (optional)
 - **Automatic Indexing**: Server auto-indexes on startup
@@ -14,14 +15,14 @@
 
 ## Quick Start
 
-### 1. Set your OpenAI API key
+### 1. Download the embedding model (one-time, requires network)
+
+The first time you run the server, it will automatically download the embedding model (~23MB) to the cache directory. After this initial download, the server works completely offline.
 
 ```bash
-# Windows PowerShell
-$env:OPENAI_API_KEY = "sk-your-key-here"
-
-# Or create a .env file
-echo OPENAI_API_KEY=sk-your-key-here > .env
+# Model is cached in ./model-cache by default
+# To use a custom location:
+$env:LOCAL_MODEL_CACHE_DIR = "C:/path/to/model-cache"
 ```
 
 ### 2. Add your documents
@@ -110,7 +111,8 @@ Add to `.vscode/mcp.json` or `.cursor/mcp.json`:
       "command": "node",
       "args": ["path/to/mcp-servers/src/docsearch/dist/index.js"],
       "env": {
-        "OPENAI_API_KEY": "sk-your-key-here"
+        "DOCSEARCH_DATA_DIR": "./data",
+        "LOCAL_MODEL_CACHE_DIR": "./model-cache"
       }
     }
   }
@@ -126,6 +128,25 @@ Add to `.vscode/mcp.json` or `.cursor/mcp.json`:
       "command": "npx",
       "args": ["mcp-server-docsearch"],
       "env": {
+        "DOCSEARCH_DATA_DIR": "./data"
+      }
+    }
+  }
+}
+```
+
+### Using OpenAI (optional)
+
+If you prefer to use OpenAI embeddings instead of local models:
+
+```json
+{
+  "mcpServers": {
+    "docsearch": {
+      "command": "npx",
+      "args": ["mcp-server-docsearch"],
+      "env": {
+        "EMBEDDINGS_PROVIDER": "openai",
         "OPENAI_API_KEY": "sk-your-key-here"
       }
     }
@@ -135,11 +156,27 @@ Add to `.vscode/mcp.json` or `.cursor/mcp.json`:
 
 ## Environment Variables
 
+### Core Configuration
+
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `OPENAI_API_KEY` | Yes | - | OpenAI API key for embeddings |
 | `DOCSEARCH_DATA_DIR` | No | `./data` | Base data directory |
 | `DOCSEARCH_CRAWL_LIFETIME_DAYS` | No | `30` | Days before re-crawling URLs |
+| `EMBEDDINGS_PROVIDER` | No | `local` | Provider: `local`, `openai`, or `tei` |
+
+### Local Embeddings (Default)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LOCAL_EMBED_MODEL` | `Xenova/all-MiniLM-L6-v2` | Local transformer model |
+| `LOCAL_EMBED_DIM` | `384` | Embedding dimension |
+| `LOCAL_MODEL_CACHE_DIR` | `./model-cache` | Model cache directory |
+
+### OpenAI Embeddings (Optional)
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `OPENAI_API_KEY` | When using OpenAI | - | OpenAI API key |
 | `OPENAI_EMBED_MODEL` | No | `text-embedding-3-small` | Embedding model |
 | `OPENAI_EMBED_DIM` | No | `1536` | Embedding dimension |
 
@@ -215,15 +252,30 @@ docsearch start
 ## How It Works
 
 1. **Indexing**: Documents are split into chunks and stored in SQLite
-2. **Embeddings**: Each chunk gets an OpenAI embedding for semantic search
+2. **Embeddings**: Each chunk gets a vector embedding for semantic search
+   - Default: Local transformer model (`Xenova/all-MiniLM-L6-v2`) - no API required
+   - Optional: OpenAI embeddings (requires API key)
 3. **FTS5**: Full-text search index for keyword matching
 4. **Hybrid Search**: Combines vector similarity with keyword matching for best results
 
+## Switching Embedding Providers
+
+**Important**: Different embedding models produce different dimension vectors. If you switch providers, you must re-index your documents:
+
+1. Delete the existing database: `rm ./data/index.db`
+2. Set the new provider: `$env:EMBEDDINGS_PROVIDER = "openai"` (or `"local"`)
+3. Run the server to re-index
+
+| Provider | Model | Dimensions |
+|----------|-------|------------|
+| `local` (default) | Xenova/all-MiniLM-L6-v2 | 384 |
+| `openai` | text-embedding-3-small | 1536 |
+
 ## Troubleshooting
 
-### "OPENAI_API_KEY not set"
+### "Model not found in cache directory"
 
-Make sure you have set the environment variable or created a `.env` file.
+The embedding model needs to be downloaded on first use. Make sure you have network access for the initial download, then the server works offline.
 
 ### "No documents found"
 

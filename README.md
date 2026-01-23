@@ -32,6 +32,7 @@ These servers aim to demonstrate MCP features and the official SDKs.
 - **[Time](src/time)** - Time and timezone conversion capabilities.
 - **[Docsearch](src/docsearch)** - Hybrid semantic + keyword search across local files and web documentation.
 - **[Fake Qdrant](src/fake-qdrant)** - Local Qdrant-compatible vector database using SQLite.
+- **[Local Embeddings](src/local-embeddings)** - Fully local/offline text embeddings using Transformers.js.
 
 ## 🚀 RooCode Quick Setup
 
@@ -49,9 +50,9 @@ npm install
 
 ```bash
 # Copy to your project's .roo folder
-copy mcp-servers\mcp-config-roocode.json <YOUR_PROJECT>\.roo\mcp.json
+copy mcp-servers\mcp-config-template.json <YOUR_PROJECT>\.roo\mcp.json
 mkdir <YOUR_PROJECT>\.roo\rules
-copy mcp-servers\.roo\rules\mcp-servers.md <YOUR_PROJECT>\.roo\rules\
+copy mcp-servers\docs\mcp-servers-rules.md <YOUR_PROJECT>\.roo\rules\mcp-servers.md
 ```
 
 ### 3. Edit `mcp.json` Placeholders
@@ -59,9 +60,10 @@ copy mcp-servers\.roo\rules\mcp-servers.md <YOUR_PROJECT>\.roo\rules\
 | Placeholder | Replace With |
 |-------------|--------------|
 | `<MCP_SERVERS_PATH>` | Path to mcp-servers folder (e.g., `C:\\DEVHOME\\GITHUB\\mcp-servers`) |
-| `<YOUR_OPENAI_API_KEY>` | Your OpenAI API key |
-| `<YOUR_PROJECT_PATH>` | Your project's root path |
+| `<PROJECT_PATH>` | Your project's root path (for docsearch data) |
 | `<ALLOWED_PATH>` | Directory for filesystem access |
+
+> **Note:** OpenAI API key is no longer required! Docsearch now uses local embeddings by default (fully offline after first model download).
 
 ### 4. Restart RooCode
 
@@ -74,6 +76,7 @@ The rule file (`mcp-servers.md`) teaches RooCode's AI to:
 - ✅ Use **memory** for persistent storage across sessions
 - ✅ Use **filesystem** for cross-project file operations
 - ✅ Use **sequentialthinking** for complex reasoning
+- ✅ Use **local-embeddings** for custom vector operations
 
 📖 **Full setup guide:** [ROOCODE-SETUP.md](ROOCODE-SETUP.md)
 
@@ -83,7 +86,7 @@ The rule file (`mcp-servers.md`) teaches RooCode's AI to:
 - Node.js 20+
 - npm
 - RooCode or Cursor extension installed
-- OpenAI API key (required for docsearch)
+- No API keys required! (local embeddings work offline)
 
 **Steps:**
 1. Clone this repo and run `npm install`
@@ -94,7 +97,6 @@ The rule file (`mcp-servers.md`) teaches RooCode's AI to:
    - `<MCP_SERVERS_PATH>` → path to this repo
    - `<ALLOWED_PATH>` → filesystem root you allow
    - `<PROJECT_PATH>` → your project root
-   - `${OPENAI_API_KEY}` → your OpenAI API key
 4. Copy rules file for AI guidance:
    - Cursor: `.cursor/rules/mcp-usage.mdc`
    - RooCode: `.roo/rules/mcp-servers.md`
