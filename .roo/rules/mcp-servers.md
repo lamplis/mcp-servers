@@ -81,6 +81,11 @@ This rule file instructs the AI assistant on how to effectively use the availabl
 - Use `mode: "keyword"` for exact phrase matching
 - After finding results, use `docchunk://{id}` to get full context
 
+**Query tips for better results:**
+- If the user asks for the latest/newest info, set `latest: true`
+- For broad topics, raise `topK` to 10-15
+- Start with a specific query, then broaden if needed
+
 ---
 
 ### central-sequentialthinking (Reasoning)

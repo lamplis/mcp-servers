@@ -77,6 +77,39 @@ The rule file (`mcp-servers.md`) teaches RooCode's AI to:
 
 📖 **Full setup guide:** [ROOCODE-SETUP.md](ROOCODE-SETUP.md)
 
+### RooCode/Cursor Installation Guide
+
+**Prerequisites:**
+- Node.js 20+
+- npm
+- RooCode or Cursor extension installed
+- OpenAI API key (required for docsearch)
+
+**Steps:**
+1. Clone this repo and run `npm install`
+2. Copy `mcp-config-template.json` to your project:
+   - RooCode: `<project>/.roo/mcp.json`
+   - Cursor: `<project>/.cursor/mcp.json`
+3. Replace placeholders:
+   - `<MCP_SERVERS_PATH>` → path to this repo
+   - `<ALLOWED_PATH>` → filesystem root you allow
+   - `<PROJECT_PATH>` → your project root
+   - `${OPENAI_API_KEY}` → your OpenAI API key
+4. Copy rules file for AI guidance:
+   - Cursor: `.cursor/rules/mcp-usage.mdc`
+   - RooCode: `.roo/rules/mcp-servers.md`
+5. Restart the IDE
+
+**Quick validation:**
+```
+doc-search { "query": "TypeScript 5 9 release notes", "latest": true, "topK": 5 }
+```
+
+**Environment variables:**
+- `OPENAI_API_KEY`
+- `DOCSEARCH_DATA_DIR`
+- `DOCSEARCH_CRAWL_LIFETIME_DAYS` (optional)
+
 ### Archived
 
 The following reference servers are now archived and can be found at [servers-archived](https://github.com/modelcontextprotocol/servers-archived).
