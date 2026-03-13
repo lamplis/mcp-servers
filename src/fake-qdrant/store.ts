@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -65,26 +66,14 @@ export class Store {
     return path.join(this.baseDir, `${name}.db`);
   }
 
-  /**
-   * Get or open a database connection for a collection.
-   * Returns null if the collection doesn't exist.
-   */
   private getDb(name: string): Database.Database | null {
-    // Check cache first
     let db = this.dbs.get(name);
     if (db) {
       return db;
     }
 
-    // Try to open existing database
     const dbFile = this.dbPath(name);
-    try {
-      // Check if file exists synchronously (better-sqlite3 is sync)
-      const stats = require("fs").statSync(dbFile);
-      if (!stats.isFile()) {
-        return null;
-      }
-    } catch {
+    if (!existsSync(dbFile)) {
       return null;
     }
 
