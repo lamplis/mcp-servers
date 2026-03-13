@@ -12,7 +12,7 @@ export interface FakeQdrantConfig {
   localEmbeddingsTarget: string | null;
 }
 
-const ALLOWED_EXTERNAL_MODEL = "bge-large-en-v1.5-ITG";
+const DEFAULT_EXTERNAL_MODEL = "bge-large-en-v1.5";
 
 export function loadConfig(
   env: Record<string, string | undefined> = process.env
@@ -28,7 +28,6 @@ export function loadConfig(
         "FAKE_QDRANT_EMBEDDING_BASE_URL is required when FAKE_QDRANT_EMBEDDING_PROVIDER=external"
       );
     }
-    validateExternalModel(embeddingModel);
   }
 
   return {
@@ -44,8 +43,8 @@ export function loadConfig(
   };
 }
 
-export function getAllowedExternalModel(): string {
-  return ALLOWED_EXTERNAL_MODEL;
+export function getDefaultExternalModel(): string {
+  return DEFAULT_EXTERNAL_MODEL;
 }
 
 function parseProviderMode(value: string): EmbeddingProviderMode {
@@ -56,15 +55,6 @@ function parseProviderMode(value: string): EmbeddingProviderMode {
   throw new ConfigError(
     `Invalid FAKE_QDRANT_EMBEDDING_PROVIDER: "${value}". Must be "local" or "external".`
   );
-}
-
-export function validateExternalModel(model: string | null): void {
-  const effective = model ?? ALLOWED_EXTERNAL_MODEL;
-  if (effective !== ALLOWED_EXTERNAL_MODEL) {
-    throw new ConfigError(
-      `External embedding model must be "${ALLOWED_EXTERNAL_MODEL}", got "${effective}".`
-    );
-  }
 }
 
 function parsePort(value: string | undefined, fallback: number): number {

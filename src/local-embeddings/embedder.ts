@@ -38,6 +38,8 @@ export const DEFAULT_EMBED_CONCURRENCY = 2;
 
 const KNOWN_DIMENSIONS: Record<string, number> = {
   "Xenova/all-MiniLM-L6-v2": 384,
+  "Xenova/bge-small-en-v1.5": 384,
+  "Xenova/bge-base-en-v1.5": 768,
   "Xenova/bge-m3": 1024,
   "Xenova/bge-large-en-v1.5": 1024,
 };

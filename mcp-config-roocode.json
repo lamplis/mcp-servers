@@ -37,7 +37,13 @@
       "command": "npx",
       "args": ["tsx", "src/fake-qdrant/index.ts"],
       "cwd": "C:\\DEVHOME\\GITHUB\\mcp-servers",
-      "env": { "FAKE_QDRANT_ENABLED": "1", "FAKE_QDRANT_HTTP_PORT": "6333" },
+      "env": {
+        "FAKE_QDRANT_ENABLED": "1",
+        "FAKE_QDRANT_HTTP_PORT": "6333",
+        "FAKE_QDRANT_DATA_DIR": "./data/fake-qdrant",
+        "FAKE_QDRANT_EMBEDDING_PROVIDER": "local",
+        "FAKE_QDRANT_LOCAL_EMBEDDINGS_TARGET": "http://127.0.0.1:3100"
+      },
       "disabled": false,
       "alwaysAllow": [
         "fake_qdrant_list_collections",
@@ -51,22 +57,32 @@
       ]
     },
     "central-docsearch": {
-      "$comment": "Auto-start: Document search with local embeddings (offline-first, no API key required)",
+      "$comment": "Auto-start: Document search with centralized embedding server",
       "command": "npx",
       "args": ["tsx", "src/docsearch/index.ts"],
       "cwd": "C:\\DEVHOME\\GITHUB\\mcp-servers",
       "env": {
-        "EMBEDDINGS_PROVIDER": "local",
-        "DOCSEARCH_DATA_DIR": "C:\\DEVHOME\\GITHUB\\Joomla-1.0\\.roo\\docsearch-data"
+        "DOCSEARCH_DATA_DIR": "C:\\DEVHOME\\GITHUB\\Joomla-1.0\\.roo\\docsearch-data",
+        "EMBEDDINGS_PROVIDER": "openai",
+        "OPENAI_EMBED_API_KEY": "local",
+        "OPENAI_EMBED_BASE_URL": "http://127.0.0.1:3100/v1",
+        "OPENAI_EMBED_MODEL": "Xenova/bge-small-en-v1.5",
+        "OPENAI_EMBED_DIM": "384"
       },
       "disabled": false,
       "alwaysAllow": ["doc-search", "doc-ingest", "doc-ingest-status"]
     },
     "central-local-embeddings": {
-      "$comment": "Auto-start: Local/offline text embeddings using Transformers.js (model cached in ./model-cache)",
+      "$comment": "Auto-start: Local/offline text embeddings using Transformers.js + HTTP API on port 3100",
       "command": "npx",
       "args": ["tsx", "src/local-embeddings/index.ts"],
       "cwd": "C:\\DEVHOME\\GITHUB\\mcp-servers",
+      "env": {
+        "MODEL_ID": "Xenova/bge-small-en-v1.5",
+        "MODEL_ASSETS_DIR": "./model-cache",
+        "EMBEDDINGS_HTTP_PORT": "3100",
+        "EMBEDDINGS_HTTP_HOST": "127.0.0.1"
+      },
       "disabled": false,
       "alwaysAllow": ["embeddings", "prefetch_model", "health"]
     }

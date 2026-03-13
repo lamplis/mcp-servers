@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { loadConfig, ConfigError, validateExternalModel, getAllowedExternalModel } from "../config.js";
+import { loadConfig, ConfigError, getDefaultExternalModel } from "../config.js";
 
 describe("loadConfig", () => {
   it("should return defaults when no env vars are set", () => {
@@ -53,11 +53,11 @@ describe("loadConfig", () => {
     const config = loadConfig({
       FAKE_QDRANT_EMBEDDING_PROVIDER: "external",
       FAKE_QDRANT_EMBEDDING_BASE_URL: "https://api.example.com",
-      FAKE_QDRANT_EMBEDDING_MODEL: "bge-large-en-v1.5-ITG",
+      FAKE_QDRANT_EMBEDDING_MODEL: "bge-large-en-v1.5",
     });
     expect(config.embeddingProvider).toBe("external");
     expect(config.embeddingBaseUrl).toBe("https://api.example.com");
-    expect(config.embeddingModel).toBe("bge-large-en-v1.5-ITG");
+    expect(config.embeddingModel).toBe("bge-large-en-v1.5");
   });
 
   it("should accept external provider without explicit model (defaults to allowed)", () => {
@@ -77,21 +77,13 @@ describe("loadConfig", () => {
     ).toThrow("FAKE_QDRANT_EMBEDDING_BASE_URL is required");
   });
 
-  it("should reject external provider with wrong model", () => {
-    expect(() =>
-      loadConfig({
-        FAKE_QDRANT_EMBEDDING_PROVIDER: "external",
-        FAKE_QDRANT_EMBEDDING_BASE_URL: "https://api.example.com",
-        FAKE_QDRANT_EMBEDDING_MODEL: "text-embedding-3-small",
-      })
-    ).toThrow(ConfigError);
-    expect(() =>
-      loadConfig({
-        FAKE_QDRANT_EMBEDDING_PROVIDER: "external",
-        FAKE_QDRANT_EMBEDDING_BASE_URL: "https://api.example.com",
-        FAKE_QDRANT_EMBEDDING_MODEL: "text-embedding-3-small",
-      })
-    ).toThrow("bge-large-en-v1.5-ITG");
+  it("should accept external provider with any model name", () => {
+    const config = loadConfig({
+      FAKE_QDRANT_EMBEDDING_PROVIDER: "external",
+      FAKE_QDRANT_EMBEDDING_BASE_URL: "https://api.example.com",
+      FAKE_QDRANT_EMBEDDING_MODEL: "text-embedding-3-small",
+    });
+    expect(config.embeddingModel).toBe("text-embedding-3-small");
   });
 
   it("should reject invalid provider mode", () => {
@@ -111,23 +103,8 @@ describe("loadConfig", () => {
   });
 });
 
-describe("validateExternalModel", () => {
-  it("should accept the allowed model", () => {
-    expect(() => validateExternalModel("bge-large-en-v1.5-ITG")).not.toThrow();
-  });
-
-  it("should accept null (defaults to allowed model)", () => {
-    expect(() => validateExternalModel(null)).not.toThrow();
-  });
-
-  it("should reject any other model", () => {
-    expect(() => validateExternalModel("gpt-4")).toThrow(ConfigError);
-    expect(() => validateExternalModel("gpt-4")).toThrow("bge-large-en-v1.5-ITG");
-  });
-});
-
-describe("getAllowedExternalModel", () => {
-  it("should return the allowed model constant", () => {
-    expect(getAllowedExternalModel()).toBe("bge-large-en-v1.5-ITG");
+describe("getDefaultExternalModel", () => {
+  it("should return bge-large-en-v1.5 as default", () => {
+    expect(getDefaultExternalModel()).toBe("bge-large-en-v1.5");
   });
 });

@@ -5,7 +5,6 @@ import Database from 'better-sqlite3';
 import * as sqliteVec from 'sqlite-vec';
 
 import { CONFIG } from '../shared/config.js';
-import { getEmbeddingDimension } from './embeddings.js';
 
 export type DB = Database.Database;
 
@@ -17,7 +16,7 @@ export interface DbConfig {
 export function openDb(config?: Partial<DbConfig>): DB {
   const dbConfig: DbConfig = {
     path: config?.path ?? CONFIG.DB_PATH,
-    embeddingDim: config?.embeddingDim ?? getEmbeddingDimension(),
+    embeddingDim: config?.embeddingDim ?? CONFIG.OPENAI_EMBED_DIM,
   };
 
   const dir = dirname(dbConfig.path);

@@ -1,0 +1,222 @@
+# Playwright MCP
+
+Playwright MCP is a Model Context Protocol (MCP) server that provides browser automation capabilities using Playwright. It enables Large Language Models (LLMs) to interact with web pages through structured accessibility snapshots, bypassing the need for screenshots or visually-tuned models. The server operates purely on structured data, making it fast, lightweight, and LLM-friendly.
+
+The project is designed to integrate with MCP clients like VS Code, Cursor, Windsurf, Claude Desktop, and other AI assistants. It supports multiple browsers (Chrome, Firefox, WebKit), offers persistent and isolated browser profiles, and can connect to existing browser instances via a Chrome extension. Key features include deterministic tool application, coordinate-based interactions (opt-in), PDF generation, and developer tools integration.
+
+## MCP Client Configuration
+
+Configure Playwright MCP server in your MCP client's configuration file to enable browser automation capabilities.
+
+```json
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@latest"
+      ]
+    }
+  }
+}
+```
+
+## Headless Mode Configuration
+
+Run the browser in headless mode for server environments or CI/CD pipelines.
+
+```json
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@latest",
+        "--headless"
+      ]
+    }
+  }
+}
+```
+
+## Browser Selection
+
+Specify which browser engine to use for automation (chrome, firefox, webkit, msedge).
+
+```json
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@latest",
+        "--browser=firefox"
+      ]
+    }
+  }
+}
+```
+
+## Tool: browser_navigate
+
+Navigate to a URL in the browser. Returns an accessibility snapshot of the page.
+
+```javascript
+await client.callTool({
+  name: 'browser_navigate',
+  arguments: { url: 'https://example.com' }
+});
+```
+
+## Tool: browser_click
+
+Click on an element identified by its reference from the accessibility snapshot.
+
+```javascript
+await client.callTool({
+  name: 'browser_click',
+  arguments: {
+    element: 'Submit button',
+    ref: 'e2'
+  }
+});
+```
+
+## Tool: browser_type
+
+Type text into an editable element such as input fields or text areas.
+
+```javascript
+await client.callTool({
+  name: 'browser_type',
+  arguments: {
+    element: 'Search input',
+    ref: 'e3',
+    text: 'playwright automation',
+    submit: true
+  }
+});
+```
+
+## Tool: browser_snapshot
+
+Capture an accessibility snapshot of the current page for element discovery.
+
+```javascript
+await client.callTool({
+  name: 'browser_snapshot',
+  arguments: {}
+});
+```
+
+## Tool: browser_take_screenshot
+
+Capture a visual screenshot of the page or specific element.
+
+```javascript
+await client.callTool({
+  name: 'browser_take_screenshot',
+  arguments: {
+    type: 'png',
+    filename: 'page-screenshot.png',
+    fullPage: true
+  }
+});
+```
+
+## Tool: browser_tabs
+
+Manage browser tabs - list, create, close, or switch between tabs.
+
+```javascript
+await client.callTool({
+  name: 'browser_tabs',
+  arguments: { action: 'list' }
+});
+```
+
+## Tool: browser_evaluate
+
+Execute arbitrary JavaScript code on the page or element.
+
+```javascript
+await client.callTool({
+  name: 'browser_evaluate',
+  arguments: {
+    function: '() => document.title'
+  }
+});
+```
+
+## Tool: browser_wait_for
+
+Wait for specific conditions - text appearance, disappearance, or time delay.
+
+```javascript
+await client.callTool({
+  name: 'browser_wait_for',
+  arguments: { text: 'Loading complete' }
+});
+```
+
+## Tool: browser_handle_dialog
+
+Handle browser dialogs (alert, confirm, prompt).
+
+```javascript
+await client.callTool({
+  name: 'browser_handle_dialog',
+  arguments: { accept: true }
+});
+```
+
+## Tool: browser_press_key
+
+Press keyboard keys for navigation and shortcuts.
+
+```javascript
+await client.callTool({
+  name: 'browser_press_key',
+  arguments: { key: 'Enter' }
+});
+```
+
+## Vision Capability - Coordinate-Based Tools
+
+Enable coordinate-based mouse interactions by adding the vision capability.
+
+```json
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@latest",
+        "--caps=vision"
+      ]
+    }
+  }
+}
+```
+
+## PDF Capability
+
+Enable PDF generation by adding the pdf capability.
+
+```json
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@latest",
+        "--caps=pdf"
+      ]
+    }
+  }
+}
+```
+
+## Summary
+
+Playwright MCP serves as a bridge between AI assistants and browser automation, enabling LLMs to interact with web pages through structured accessibility data rather than pixel-based approaches. The primary use cases include automated web testing, web scraping, form filling, UI interaction automation, and building AI agents that need to browse the web.

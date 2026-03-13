@@ -37,18 +37,12 @@ function createMockEmbeddingServer(
 }
 
 describe("ExternalEmbeddingProvider", () => {
-  it("should reject non-allowed model", () => {
-    expect(
-      () => new ExternalEmbeddingProvider("http://localhost:1234", "gpt-4")
-    ).toThrow(ConfigError);
-  });
-
-  it("should accept the allowed model", () => {
+  it("should accept any model name", () => {
     const provider = new ExternalEmbeddingProvider(
       "http://localhost:1234",
-      "bge-large-en-v1.5-ITG"
+      "bge-large-en-v1.5"
     );
-    expect(provider.model).toBe("bge-large-en-v1.5-ITG");
+    expect(provider.model).toBe("bge-large-en-v1.5");
     expect(provider.mode).toBe("external");
     expect(provider.dimensions).toBeNull();
   });
@@ -57,7 +51,7 @@ describe("ExternalEmbeddingProvider", () => {
     const mock = await createMockEmbeddingServer(() => ({
       status: 200,
       data: {
-        model: "bge-large-en-v1.5-ITG",
+        model: "bge-large-en-v1.5",
         data: [
           { index: 0, embedding: [0.1, 0.2, 0.3] },
           { index: 1, embedding: [0.4, 0.5, 0.6] },
@@ -68,11 +62,11 @@ describe("ExternalEmbeddingProvider", () => {
     try {
       const provider = new ExternalEmbeddingProvider(
         `http://127.0.0.1:${mock.port}`,
-        "bge-large-en-v1.5-ITG"
+        "bge-large-en-v1.5"
       );
       const result = await provider.embed(["hello", "world"]);
 
-      expect(result.model).toBe("bge-large-en-v1.5-ITG");
+      expect(result.model).toBe("bge-large-en-v1.5");
       expect(result.embeddings).toHaveLength(2);
       expect(result.embeddings[0]).toEqual([0.1, 0.2, 0.3]);
       expect(result.dimensions).toBe(3);
@@ -91,7 +85,7 @@ describe("ExternalEmbeddingProvider", () => {
     try {
       const provider = new ExternalEmbeddingProvider(
         `http://127.0.0.1:${mock.port}`,
-        "bge-large-en-v1.5-ITG"
+        "bge-large-en-v1.5"
       );
       await expect(provider.embed(["test"])).rejects.toThrow("status 500");
     } finally {
@@ -154,11 +148,11 @@ describe("createProvider", () => {
       ...baseConfig,
       embeddingProvider: "external",
       embeddingBaseUrl: "https://api.example.com",
-      embeddingModel: "bge-large-en-v1.5-ITG",
+      embeddingModel: "bge-large-en-v1.5",
     });
     expect(provider).not.toBeNull();
     expect(provider!.mode).toBe("external");
-    expect(provider!.model).toBe("bge-large-en-v1.5-ITG");
+    expect(provider!.model).toBe("bge-large-en-v1.5");
   });
 
   it("should throw if external mode lacks base URL", () => {

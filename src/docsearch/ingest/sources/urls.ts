@@ -247,14 +247,33 @@ interface CrawledPage {
 }
 
 /**
- * Fetch a web page and return both content and raw HTML
+ * Extract title from plain-text content (first non-empty line, stripped of
+ * leading '#' if present). Falls back to the URL path.
+ */
+function extractTitleFromText(text: string, url: string): string {
+  const firstLine = text.split('\n').find((l) => l.trim().length > 0);
+  if (firstLine) {
+    const cleaned = firstLine.replace(/^#+\s*/, '').trim();
+    if (cleaned.length > 0 && cleaned.length <= 200) return cleaned;
+  }
+  try {
+    const urlObj = new URL(url);
+    const pathParts = urlObj.pathname.split('/').filter(Boolean);
+    return pathParts[pathParts.length - 1] || urlObj.hostname;
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * Fetch a web page (HTML or plain text) and return its content.
  */
 async function fetchPage(url: string): Promise<CrawledPage | null> {
   try {
     const response = await fetch(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (compatible; docsearch-mcp/1.0)',
-        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        Accept: 'text/html,application/xhtml+xml,text/plain,text/markdown,*/*;q=0.8',
       },
     });
 
@@ -263,23 +282,35 @@ async function fetchPage(url: string): Promise<CrawledPage | null> {
       return null;
     }
 
-    // Check content type
     const contentType = response.headers.get('content-type') || '';
-    if (!contentType.includes('text/html') && !contentType.includes('application/xhtml')) {
-      console.warn(`[crawl] Skipping non-HTML content at ${url}`);
+    const isHtml = contentType.includes('text/html') || contentType.includes('application/xhtml');
+    const isPlainText = contentType.includes('text/plain') || contentType.includes('text/markdown');
+
+    if (!isHtml && !isPlainText) {
+      console.warn(`[crawl] Skipping unsupported content-type at ${url}: ${contentType}`);
       return null;
     }
 
-    const html = await response.text();
-    const title = extractTitle(html, url);
-    const content = extractContent(html);
+    const rawText = await response.text();
+
+    if (isPlainText) {
+      if (!rawText || rawText.trim().length < 50) {
+        console.warn(`[crawl] No meaningful content at ${url}`);
+        return null;
+      }
+      const title = extractTitleFromText(rawText, url);
+      return { url, title, content: rawText.trim(), html: '' };
+    }
+
+    const title = extractTitle(rawText, url);
+    const content = extractContent(rawText);
 
     if (!content || content.length < 50) {
       console.warn(`[crawl] No meaningful content at ${url}`);
       return null;
     }
 
-    return { url, title, content, html };
+    return { url, title, content, html: rawText };
   } catch (error) {
     console.warn(`[crawl] Error fetching ${url}:`, error);
     return null;

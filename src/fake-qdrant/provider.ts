@@ -4,7 +4,7 @@ import { URL } from "node:url";
 
 import {
   type FakeQdrantConfig,
-  getAllowedExternalModel,
+  getDefaultExternalModel,
   ConfigError,
 } from "./config.js";
 
@@ -68,13 +68,7 @@ export class ExternalEmbeddingProvider implements EmbeddingProvider {
   constructor(
     private readonly baseUrl: string,
     readonly model: string
-  ) {
-    if (model !== getAllowedExternalModel()) {
-      throw new ConfigError(
-        `External embedding model must be "${getAllowedExternalModel()}", got "${model}".`
-      );
-    }
-  }
+  ) {}
 
   get dimensions(): number | null {
     return this._dimensions;
@@ -119,7 +113,7 @@ export function createProvider(config: FakeQdrantConfig): EmbeddingProvider | nu
         "FAKE_QDRANT_EMBEDDING_BASE_URL is required for external provider"
       );
     }
-    const model = config.embeddingModel ?? getAllowedExternalModel();
+    const model = config.embeddingModel ?? getDefaultExternalModel();
     return new ExternalEmbeddingProvider(config.embeddingBaseUrl, model);
   }
 
