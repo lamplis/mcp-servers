@@ -4,12 +4,14 @@ import { z } from "zod";
 
 import {
   embedTexts,
-  getCacheDir,
+  getAssetsDir,
   getCacheStats,
   getConcurrencyLimit,
   getDefaultModelId,
   getLoadedModels,
+  getOutputDimensions,
   prefetchModel,
+  verifyAssets,
 } from "./embedder.js";
 
 const packageJson = JSON.parse(
@@ -103,17 +105,72 @@ export async function createServer(): Promise<LocalEmbeddingsServerFactoryRespon
   );
 
   server.registerTool(
+    "verify_assets",
+    {
+      title: "Verify model assets",
+      description:
+        "Validate that the configured local model and required runtime assets exist in the repository and are loadable.",
+      inputSchema: {
+        model: z.string().optional(),
+        warmup: z.boolean().optional(),
+      },
+      outputSchema: {
+        model: z.string(),
+        assetsDir: z.string(),
+        status: z.enum(["ok", "missing", "incomplete"]),
+        dimensions: z.number().int().nullable(),
+      },
+    },
+    async (input) => {
+      const model = input.model ?? getDefaultModelId();
+      try {
+        const result = await verifyAssets(model, input.warmup ?? false);
+        const payload = {
+          model: result.model,
+          assetsDir: result.assetsDir,
+          status: result.status,
+          dimensions: result.dimensions,
+        };
+
+        if (result.status !== "ok") {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Asset verification failed (${result.status}). Missing: ${result.missingFiles.join(", ")}`,
+              },
+            ],
+            structuredContent: payload,
+            isError: true,
+          };
+        }
+
+        return {
+          content: [
+            { type: "text" as const, text: JSON.stringify(payload, null, 2) },
+          ],
+          structuredContent: payload,
+        };
+      } catch (error) {
+        return toolError(
+          error instanceof Error ? error.message : "Failed to verify assets"
+        );
+      }
+    }
+  );
+
+  server.registerTool(
     "prefetch_model",
     {
       title: "Prefetch embedding model",
       description:
-        "Download and cache the embedding model for offline use.",
+        "Download and cache the embedding model for offline use. Requires network access.",
       inputSchema: {
         model: z.string().optional(),
       },
       outputSchema: {
         model: z.string(),
-        cacheDir: z.string(),
+        assetsDir: z.string(),
         status: z.literal("ok"),
       },
     },
@@ -123,7 +180,7 @@ export async function createServer(): Promise<LocalEmbeddingsServerFactoryRespon
         await prefetchModel(model);
         const payload = {
           model,
-          cacheDir: getCacheDir(),
+          assetsDir: getAssetsDir(),
           status: "ok" as const,
         };
         return {
@@ -144,12 +201,13 @@ export async function createServer(): Promise<LocalEmbeddingsServerFactoryRespon
     "health",
     {
       title: "Health check",
-      description: "Report model and runtime status.",
+      description: "Report model, asset, and runtime status.",
       inputSchema: {},
       outputSchema: {
         model: z.string(),
         modelLoaded: z.boolean(),
-        cacheDir: z.string(),
+        assetsDir: z.string(),
+        dimensions: z.number().int().nullable(),
         cacheEntries: z.number().int(),
         cacheCapacity: z.number().int(),
         concurrency: z.number().int(),
@@ -167,7 +225,8 @@ export async function createServer(): Promise<LocalEmbeddingsServerFactoryRespon
       const payload = {
         model,
         modelLoaded: loadedModels.includes(model),
-        cacheDir: getCacheDir(),
+        assetsDir: getAssetsDir(),
+        dimensions: getOutputDimensions(model),
         cacheEntries: cacheStats.entries,
         cacheCapacity: cacheStats.capacity,
         concurrency: getConcurrencyLimit(),

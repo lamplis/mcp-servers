@@ -1,16 +1,19 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { Store, type PointRecord } from "./store.js";
+import type { EmbeddingProvider } from "./provider.js";
 
 export type FakeQdrantServerFactoryOptions = {
   store?: Store;
   dataDir?: string;
+  embeddingProvider?: EmbeddingProvider | null;
 };
 
 export type FakeQdrantServerFactoryResponse = {
   server: McpServer;
   cleanup: (sessionId?: string) => void;
   store: Store;
+  embeddingProvider: EmbeddingProvider | null;
 };
 
 export async function createServer(
@@ -20,23 +23,30 @@ export async function createServer(
     options.store ??
     (await Store.create({ dataDir: options.dataDir }));
 
+  const embeddingProvider = options.embeddingProvider ?? null;
+
   const server = new McpServer({
     name: "fake-qdrant-server",
     version: "0.1.0",
   });
 
-  registerTools(server, store);
+  registerTools(server, store, embeddingProvider);
 
   return {
     server,
     store,
+    embeddingProvider,
     cleanup: () => {
       // No background tasks to stop for now.
     },
   };
 }
 
-function registerTools(server: McpServer, store: Store) {
+function registerTools(
+  server: McpServer,
+  store: Store,
+  _embeddingProvider: EmbeddingProvider | null
+) {
   const PointSchema = z.object({
     id: z.union([z.string(), z.number()]),
     vector: z.array(z.number()),

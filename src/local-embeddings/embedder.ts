@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { env, pipeline } from "@xenova/transformers";
@@ -20,17 +21,43 @@ export type EmbedResult = {
   embeddings: number[][];
 };
 
+export interface AssetVerification {
+  model: string;
+  assetsDir: string;
+  status: "ok" | "missing" | "incomplete";
+  dimensions: number | null;
+  missingFiles: string[];
+}
+
 type FeatureExtractionPipeline = Awaited<ReturnType<typeof pipeline>>;
 
 export const DEFAULT_MODEL_ID = "Xenova/all-MiniLM-L6-v2";
-export const DEFAULT_MODEL_CACHE_DIR = "./model-cache";
+export const DEFAULT_MODEL_ASSETS_DIR = "./model-cache";
 export const DEFAULT_EMBED_CACHE_SIZE = 1000;
 export const DEFAULT_EMBED_CONCURRENCY = 2;
 
-const cacheDir = resolveCacheDir(process.env.MODEL_CACHE_DIR);
+const KNOWN_DIMENSIONS: Record<string, number> = {
+  "Xenova/all-MiniLM-L6-v2": 384,
+  "Xenova/bge-small-en-v1.5": 384,
+  "Xenova/bge-base-en-v1.5": 768,
+  "Xenova/bge-m3": 1024,
+  "Xenova/bge-large-en-v1.5": 1024,
+};
 
-env.cacheDir = cacheDir;
+const REQUIRED_ASSET_FILES = [
+  "config.json",
+  "tokenizer.json",
+  "tokenizer_config.json",
+];
+
+const assetsDir = resolveAssetsDir(
+  process.env.MODEL_ASSETS_DIR ?? process.env.MODEL_CACHE_DIR
+);
+
+env.cacheDir = assetsDir;
+env.localModelPath = assetsDir;
 env.allowLocalModels = true;
+env.allowRemoteModels = false;
 env.useBrowserCache = false;
 
 const embedCacheSize = parsePositiveInt(
@@ -46,8 +73,13 @@ const embedSemaphore = new Semaphore(embedConcurrency);
 
 const modelPromises = new Map<string, Promise<FeatureExtractionPipeline>>();
 
+export function getAssetsDir(): string {
+  return assetsDir;
+}
+
+/** @deprecated Use getAssetsDir() instead */
 export function getCacheDir(): string {
-  return cacheDir;
+  return assetsDir;
 }
 
 export function getDefaultModelId(): string {
@@ -66,8 +98,74 @@ export function getConcurrencyLimit(): number {
   return embedConcurrency;
 }
 
+export function getOutputDimensions(modelId: string): number | null {
+  return KNOWN_DIMENSIONS[modelId] ?? null;
+}
+
+export async function verifyAssets(
+  modelId: string,
+  warmup = false
+): Promise<AssetVerification> {
+  const modelSubdir = resolveModelSubdir(modelId);
+  const missingFiles: string[] = [];
+
+  if (!existsSync(modelSubdir)) {
+    return {
+      model: modelId,
+      assetsDir: modelSubdir,
+      status: "missing",
+      dimensions: getOutputDimensions(modelId),
+      missingFiles: REQUIRED_ASSET_FILES,
+    };
+  }
+
+  for (const file of REQUIRED_ASSET_FILES) {
+    const filePath = path.join(modelSubdir, file);
+    if (!existsSync(filePath)) {
+      missingFiles.push(file);
+    }
+  }
+
+  if (missingFiles.length > 0) {
+    return {
+      model: modelId,
+      assetsDir: modelSubdir,
+      status: "incomplete",
+      dimensions: getOutputDimensions(modelId),
+      missingFiles,
+    };
+  }
+
+  let dimensions = getOutputDimensions(modelId);
+
+  if (warmup) {
+    try {
+      const pipe = await getPipeline(modelId);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const probe = await (pipe as any)(["test"], {
+        pooling: "mean",
+        normalize: true,
+      });
+      const vec = coerceEmbeddings(probe, 1, "mean", true);
+      if (vec.length > 0 && vec[0]) {
+        dimensions = vec[0].length;
+      }
+    } catch {
+      // warmup failure is not fatal for verification
+    }
+  }
+
+  return {
+    model: modelId,
+    assetsDir: modelSubdir,
+    status: "ok",
+    dimensions,
+    missingFiles: [],
+  };
+}
+
 export async function prefetchModel(modelId: string): Promise<void> {
-  await fs.mkdir(cacheDir, { recursive: true });
+  await fs.mkdir(assetsDir, { recursive: true });
   const previousAllowRemote = env.allowRemoteModels;
   env.allowRemoteModels = true;
   try {
@@ -83,7 +181,6 @@ export async function embedTexts(
 ): Promise<EmbedResult> {
   const release = await embedSemaphore.acquire();
   try {
-    env.allowRemoteModels = false;
     const model = await getPipeline(options.model);
     const cached: number[][] = [];
     const missing: string[] = [];
@@ -129,7 +226,7 @@ export async function embedTexts(
   } catch (error) {
     if (isMissingModelError(error)) {
       throw new Error(
-        "Model files not found in cache. Run prefetch_model before offline use."
+        "Model files not found in assets directory. Use verify_assets to check."
       );
     }
     throw error;
@@ -151,7 +248,12 @@ async function getPipeline(modelId: string): Promise<FeatureExtractionPipeline> 
   return created;
 }
 
-function buildCacheKey(text: string, options: EmbedOptions): string {
+function resolveModelSubdir(modelId: string): string {
+  const sanitized = modelId.replace(/\//g, path.sep);
+  return path.join(assetsDir, sanitized);
+}
+
+export function buildCacheKey(text: string, options: EmbedOptions): string {
   const payload = `${options.model}|${options.normalize}|${options.pooling}|${text}`;
   return crypto.createHash("sha256").update(payload).digest("hex");
 }
@@ -161,7 +263,6 @@ async function runEmbeddingPipeline(
   texts: readonly string[],
   options: EmbedOptions
 ): Promise<number[][]> {
-  // Convert readonly to mutable array and cast for pipeline compatibility
   const inputTexts = [...texts] as string[];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const result = await (model as any)(inputTexts, {
@@ -171,7 +272,7 @@ async function runEmbeddingPipeline(
   return coerceEmbeddings(result, texts.length, options.pooling, options.normalize);
 }
 
-function coerceEmbeddings(
+export function coerceEmbeddings(
   result: unknown,
   expected: number,
   pooling: Pooling,
@@ -264,7 +365,7 @@ function fromTensor(
   throw new Error("Unsupported tensor dimensions for embeddings");
 }
 
-function poolTokens(tokens: number[][], pooling: Pooling): number[] {
+export function poolTokens(tokens: number[][], pooling: Pooling): number[] {
   if (tokens.length === 0) {
     return [];
   }
@@ -282,7 +383,7 @@ function poolTokens(tokens: number[][], pooling: Pooling): number[] {
   return sums.map((value) => value / tokens.length);
 }
 
-function normalizeVector(vector: number[]): number[] {
+export function normalizeVector(vector: number[]): number[] {
   let sum = 0;
   for (const value of vector) {
     sum += value * value;
@@ -291,8 +392,8 @@ function normalizeVector(vector: number[]): number[] {
   return vector.map((value) => value / norm);
 }
 
-function resolveCacheDir(value?: string): string {
-  const dir = value ?? DEFAULT_MODEL_CACHE_DIR;
+function resolveAssetsDir(value?: string): string {
+  const dir = value ?? DEFAULT_MODEL_ASSETS_DIR;
   return path.resolve(process.cwd(), dir);
 }
 

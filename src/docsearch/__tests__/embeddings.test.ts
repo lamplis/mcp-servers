@@ -5,22 +5,6 @@ vi.mock('undici', () => ({
   fetch: vi.fn(),
 }));
 
-// Mock @xenova/transformers - use vi.hoisted for proper hoisting
-const { mockPipeline, mockEnv } = vi.hoisted(() => ({
-  mockPipeline: vi.fn(),
-  mockEnv: {
-    cacheDir: '',
-    allowLocalModels: true,
-    useBrowserCache: false,
-    allowRemoteModels: false,
-  },
-}));
-
-vi.mock('@xenova/transformers', () => ({
-  pipeline: mockPipeline,
-  env: mockEnv,
-}));
-
 const mockFetch = vi.mocked(fetch);
 
 // Helper function to create mock Response objects
@@ -78,6 +62,8 @@ describe('Embeddings', () => {
           OPENAI_BASE_URL: 'https://api.openai.com/v1',
           OPENAI_EMBED_MODEL: 'text-embedding-3-small',
           OPENAI_EMBED_DIM: 1536,
+          OPENAI_EMBED_BASE_URL: '',
+          OPENAI_EMBED_API_KEY: '',
           TEI_ENDPOINT: 'http://localhost:8080',
           EMBEDDINGS_PROVIDER: 'openai',
         },
@@ -97,13 +83,35 @@ describe('Embeddings', () => {
           OPENAI_BASE_URL: 'https://api.openai.com/v1',
           OPENAI_EMBED_MODEL: 'text-embedding-3-small',
           OPENAI_EMBED_DIM: 1536,
+          OPENAI_EMBED_BASE_URL: '',
+          OPENAI_EMBED_API_KEY: '',
           TEI_ENDPOINT: 'http://localhost:8080',
           EMBEDDINGS_PROVIDER: 'openai',
         },
       }));
 
       const { OpenAIEmbedder } = await import('../ingest/embeddings.js');
-      expect(() => new OpenAIEmbedder()).toThrow('OPENAI_API_KEY missing');
+      expect(() => new OpenAIEmbedder()).toThrow('OPENAI_EMBED_API_KEY (or OPENAI_API_KEY) missing');
+    });
+
+    it('should prefer OPENAI_EMBED_API_KEY and OPENAI_EMBED_BASE_URL over shared vars', async () => {
+      vi.doMock('../shared/config.js', () => ({
+        CONFIG: {
+          OPENAI_API_KEY: 'shared-key',
+          OPENAI_BASE_URL: 'https://api.openai.com/v1',
+          OPENAI_EMBED_MODEL: 'text-embedding-3-small',
+          OPENAI_EMBED_DIM: 1536,
+          OPENAI_EMBED_BASE_URL: 'http://127.0.0.1:3100/v1',
+          OPENAI_EMBED_API_KEY: 'embed-key',
+          TEI_ENDPOINT: '',
+          EMBEDDINGS_PROVIDER: 'openai',
+        },
+      }));
+
+      const { OpenAIEmbedder } = await import('../ingest/embeddings.js');
+      const embedder = new OpenAIEmbedder();
+      expect((embedder as any).apiKey).toBe('embed-key');
+      expect((embedder as any).baseURL).toBe('http://127.0.0.1:3100/v1');
     });
 
     it('should return empty array for empty input', async () => {
@@ -354,6 +362,8 @@ describe('Embeddings', () => {
           OPENAI_BASE_URL: 'https://api.openai.com/v1',
           OPENAI_EMBED_MODEL: 'text-embedding-3-small',
           OPENAI_EMBED_DIM: 1536,
+          OPENAI_EMBED_BASE_URL: '',
+          OPENAI_EMBED_API_KEY: '',
           TEI_ENDPOINT: 'http://localhost:8080',
           EMBEDDINGS_PROVIDER: 'tei',
         },
@@ -373,6 +383,8 @@ describe('Embeddings', () => {
           OPENAI_BASE_URL: 'https://api.openai.com/v1',
           OPENAI_EMBED_MODEL: 'text-embedding-3-small',
           OPENAI_EMBED_DIM: 1536,
+          OPENAI_EMBED_BASE_URL: '',
+          OPENAI_EMBED_API_KEY: '',
           TEI_ENDPOINT: '',
           EMBEDDINGS_PROVIDER: 'tei',
         },
@@ -451,6 +463,8 @@ describe('Embeddings', () => {
           OPENAI_BASE_URL: 'https://api.openai.com/v1',
           OPENAI_EMBED_MODEL: 'text-embedding-3-small',
           OPENAI_EMBED_DIM: 1536,
+          OPENAI_EMBED_BASE_URL: '',
+          OPENAI_EMBED_API_KEY: '',
           TEI_ENDPOINT: 'http://localhost:8080/',
           EMBEDDINGS_PROVIDER: 'tei',
         },
@@ -462,130 +476,18 @@ describe('Embeddings', () => {
     });
   });
 
-  describe('LocalEmbedder', () => {
-    beforeEach(() => {
-      vi.doMock('../shared/config.js', () => ({
-        CONFIG: {
-          OPENAI_API_KEY: '',
-          OPENAI_BASE_URL: 'https://api.openai.com/v1',
-          OPENAI_EMBED_MODEL: 'text-embedding-3-small',
-          OPENAI_EMBED_DIM: 1536,
-          TEI_ENDPOINT: '',
-          EMBEDDINGS_PROVIDER: 'local',
-          LOCAL_EMBED_MODEL: 'Xenova/all-MiniLM-L6-v2',
-          LOCAL_EMBED_DIM: 384,
-          LOCAL_MODEL_CACHE_DIR: './model-cache',
-        },
-      }));
-      mockPipeline.mockReset();
-    });
-
-    it('should initialize with correct configuration', async () => {
-      const { LocalEmbedder } = await import('../ingest/embeddings.js');
-      const embedder = new LocalEmbedder();
-      expect(embedder.dim).toBe(384);
-    });
-
-    it('should return empty array for empty input', async () => {
-      const { LocalEmbedder } = await import('../ingest/embeddings.js');
-      const embedder = new LocalEmbedder();
-      const result = await embedder.embed([]);
-      expect(result).toEqual([]);
-    });
-
-    it('should call pipeline and return embeddings as Float32Array', async () => {
-      // Create mock embeddings
-      const mockEmbedding1 = new Float32Array(384).fill(0.1);
-      const mockEmbedding2 = new Float32Array(384).fill(0.2);
-
-      const mockModel = vi.fn().mockResolvedValue({
-        data: Float32Array.from([...mockEmbedding1, ...mockEmbedding2]),
-        dims: [2, 384],
-      });
-      mockPipeline.mockResolvedValue(mockModel);
-
-      const { LocalEmbedder } = await import('../ingest/embeddings.js');
-      const embedder = new LocalEmbedder();
-      const result = await embedder.embed(['text1', 'text2']);
-
-      expect(mockPipeline).toHaveBeenCalledWith('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
-      expect(mockModel).toHaveBeenCalledWith(['text1', 'text2'], {
-        pooling: 'mean',
-        normalize: true,
-      });
-      expect(result).toHaveLength(2);
-      expect(result[0]).toBeInstanceOf(Float32Array);
-      expect(result[1]).toBeInstanceOf(Float32Array);
-    });
-
-    it('should handle array output format', async () => {
-      const mockModel = vi.fn().mockResolvedValue([
-        new Float32Array([0.1, 0.2, 0.3]),
-        new Float32Array([0.4, 0.5, 0.6]),
-      ]);
-      mockPipeline.mockResolvedValue(mockModel);
-
-      const { LocalEmbedder } = await import('../ingest/embeddings.js');
-      const embedder = new LocalEmbedder();
-      const result = await embedder.embed(['text1', 'text2']);
-
-      expect(result).toHaveLength(2);
-      // Use closeTo for Float32Array precision tolerance
-      const arr0 = Array.from(result[0]!);
-      const arr1 = Array.from(result[1]!);
-      expect(arr0[0]).toBeCloseTo(0.1, 5);
-      expect(arr0[1]).toBeCloseTo(0.2, 5);
-      expect(arr0[2]).toBeCloseTo(0.3, 5);
-      expect(arr1[0]).toBeCloseTo(0.4, 5);
-      expect(arr1[1]).toBeCloseTo(0.5, 5);
-      expect(arr1[2]).toBeCloseTo(0.6, 5);
-    });
-
-    it('should throw descriptive error when model not found', async () => {
-      mockPipeline.mockRejectedValue(new Error('local model not found'));
-
-      const { LocalEmbedder } = await import('../ingest/embeddings.js');
-      const embedder = new LocalEmbedder();
-
-      await expect(embedder.embed(['text'])).rejects.toThrow(
-        'Model "Xenova/all-MiniLM-L6-v2" not found in cache directory',
-      );
-    });
-  });
-
   describe('getEmbedder', () => {
-    it('should return LocalEmbedder by default', async () => {
-      vi.doMock('../shared/config.js', () => ({
-        CONFIG: {
-          OPENAI_API_KEY: '',
-          OPENAI_BASE_URL: 'https://api.openai.com/v1',
-          OPENAI_EMBED_MODEL: 'text-embedding-3-small',
-          OPENAI_EMBED_DIM: 1536,
-          TEI_ENDPOINT: '',
-          EMBEDDINGS_PROVIDER: 'local',
-          LOCAL_EMBED_MODEL: 'Xenova/all-MiniLM-L6-v2',
-          LOCAL_EMBED_DIM: 384,
-          LOCAL_MODEL_CACHE_DIR: './model-cache',
-        },
-      }));
-
-      const { getEmbedder, LocalEmbedder } = await import('../ingest/embeddings.js');
-      const embedder = getEmbedder();
-      expect(embedder).toBeInstanceOf(LocalEmbedder);
-    });
-
-    it('should return OpenAIEmbedder when configured', async () => {
+    it('should return OpenAIEmbedder when API key is present', async () => {
       vi.doMock('../shared/config.js', () => ({
         CONFIG: {
           OPENAI_API_KEY: 'test-key',
           OPENAI_BASE_URL: 'https://api.openai.com/v1',
           OPENAI_EMBED_MODEL: 'text-embedding-3-small',
           OPENAI_EMBED_DIM: 1536,
+          OPENAI_EMBED_BASE_URL: '',
+          OPENAI_EMBED_API_KEY: '',
           TEI_ENDPOINT: 'http://localhost:8080',
           EMBEDDINGS_PROVIDER: 'openai',
-          LOCAL_EMBED_MODEL: 'Xenova/all-MiniLM-L6-v2',
-          LOCAL_EMBED_DIM: 384,
-          LOCAL_MODEL_CACHE_DIR: './model-cache',
         },
       }));
 
@@ -601,11 +503,10 @@ describe('Embeddings', () => {
           OPENAI_BASE_URL: 'https://api.openai.com/v1',
           OPENAI_EMBED_MODEL: 'text-embedding-3-small',
           OPENAI_EMBED_DIM: 1536,
+          OPENAI_EMBED_BASE_URL: '',
+          OPENAI_EMBED_API_KEY: '',
           TEI_ENDPOINT: 'http://localhost:8080',
           EMBEDDINGS_PROVIDER: 'tei',
-          LOCAL_EMBED_MODEL: 'Xenova/all-MiniLM-L6-v2',
-          LOCAL_EMBED_DIM: 384,
-          LOCAL_MODEL_CACHE_DIR: './model-cache',
         },
       }));
 
@@ -614,23 +515,23 @@ describe('Embeddings', () => {
       expect(embedder).toBeInstanceOf(TEIEmbedder);
     });
 
-    it('should throw error when openai provider configured without API key', async () => {
+    it('should return NoOpEmbedder when no API key is configured', async () => {
       vi.doMock('../shared/config.js', () => ({
         CONFIG: {
           OPENAI_API_KEY: '',
           OPENAI_BASE_URL: 'https://api.openai.com/v1',
           OPENAI_EMBED_MODEL: 'text-embedding-3-small',
           OPENAI_EMBED_DIM: 1536,
+          OPENAI_EMBED_BASE_URL: '',
+          OPENAI_EMBED_API_KEY: '',
           TEI_ENDPOINT: '',
           EMBEDDINGS_PROVIDER: 'openai',
-          LOCAL_EMBED_MODEL: 'Xenova/all-MiniLM-L6-v2',
-          LOCAL_EMBED_DIM: 384,
-          LOCAL_MODEL_CACHE_DIR: './model-cache',
         },
       }));
 
-      const { getEmbedder } = await import('../ingest/embeddings.js');
-      expect(() => getEmbedder()).toThrow('OPENAI_API_KEY required when EMBEDDINGS_PROVIDER is "openai"');
+      const { getEmbedder, NoOpEmbedder } = await import('../ingest/embeddings.js');
+      const embedder = getEmbedder();
+      expect(embedder).toBeInstanceOf(NoOpEmbedder);
     });
   });
 });
