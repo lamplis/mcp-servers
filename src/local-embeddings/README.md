@@ -296,6 +296,10 @@ This server is designed for environments with restricted or no network access:
 
 Run `npm install` from the monorepo root or `npm install --workspace src/local-embeddings`.
 
+### Native sharp / libvips install fails
+
+The monorepo overrides `sharp` with `vendor/sharp-stub`. Text embeddings do not need libvips. Do not vendor the real native addon.
+
 ### "Model files not found in cache"
 
 The model hasn't been downloaded yet. Call `prefetch_model` with network access.

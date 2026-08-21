@@ -26,6 +26,10 @@
     "@modelcontextprotocol/server-local-embeddings": "*",
     "@modelcontextprotocol/server-memory": "*",
     "@modelcontextprotocol/server-sequential-thinking": "*",
-    "@modelcontextprotocol/server-fake-qdrant": "*"
+    "@modelcontextprotocol/server-fake-qdrant": "*",
+    "sharp": "file:vendor/sharp-stub"
+  },
+  "overrides": {
+    "sharp": "$sharp"
   }
 }

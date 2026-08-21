@@ -13,6 +13,8 @@ Validated on this workstation (Node 22 / Node 20-compatible, Windows 11, no admi
 
 Launchers allowed here: **npx** and **python** only.
 
+`@xenova/transformers` lists native `sharp` (libvips) for image tensors. This repo overrides it with [`vendor/sharp-stub`](vendor/sharp-stub) (pure JS, no `.node`, no postinstall download). Text embeddings and docsearch work. Transformers.js image pipelines do not. Keep `ENABLE_IMAGE_TO_TEXT=false`. Do not vendor the real `sharp` binary.
+
 ## Quick Start
 
 From this repo:
@@ -187,6 +189,10 @@ Stdio still works. Fake Qdrant will try to free its HTTP port. Local embeddings 
 
 The memory server writes `memory.json` in this repo (or `MEMORY_FILE_PATH` if set). The directory must be writable.
 
+### Native sharp / libvips install fails
+
+Expected. Root `package.json` maps `sharp` to `vendor/sharp-stub`. After `npm install`, `npm ls sharp` should show `vendor/sharp-stub`, not a GitHub/libvips download. Do not copy a real `sharp-*.node` into the repo. Image-to-text stays off (`ENABLE_IMAGE_TO_TEXT=false`).
+
 ### Local embeddings model not found
 
 1. Call `prefetch_model` while the model cache can be populated.
@@ -233,6 +239,7 @@ mcp-servers/
 │   ├── urls.md                   # URLs to crawl
 │   └── index/                    # JSON index (auto-created)
 ├── model-cache/                  # Transformers.js weights
+├── vendor/sharp-stub/            # Pure-JS sharp stand-in (no libvips)
 └── src/
     ├── memory/
     ├── filesystem/

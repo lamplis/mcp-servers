@@ -1,0 +1,22 @@
+{
+  "name": "sharp",
+  "version": "0.32.6",
+  "description": "Pure-JS stub without libvips. Satisfies @xenova/transformers for text embeddings only.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js",
+      "require": "./index.js",
+      "default": "./index.js"
+    }
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "README.md"
+  ]
+}
