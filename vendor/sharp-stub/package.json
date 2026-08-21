@@ -1,6 +1,6 @@
 {
   "name": "sharp",
-  "version": "0.32.6",
+  "version": "0.35.0",
   "description": "Pure-JS stub without libvips. Satisfies @xenova/transformers for text embeddings only.",
   "license": "Apache-2.0",
   "type": "module",

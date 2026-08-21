@@ -30,6 +30,12 @@
     "sharp": "file:vendor/sharp-stub"
   },
   "overrides": {
-    "sharp": "$sharp"
+    "sharp": "$sharp",
+    "@xenova/transformers": "2.17.2",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "protobufjs": "8.7.2",
+    "brace-expansion@2": "2.1.4",
+    "vitest": "3.2.7",
+    "@vitest/coverage-v8": "3.2.7"
   }
 }
