@@ -1,17 +1,15 @@
 import { join } from 'node:path';
 import dotenv from 'dotenv';
 
-type EmbeddingsProvider = 'openai' | 'tei';
+type EmbeddingsProvider = 'local' | 'openai' | 'tei';
 type ConfluenceAuthMethod = 'basic' | 'bearer';
 
 interface AppConfig {
-  // Data directories (fixed structure)
   readonly DATA_DIR: string;
   readonly DOCS_DIR: string;
   readonly URLS_FILE: string;
   readonly DB_PATH: string;
 
-  // Embeddings configuration
   readonly EMBEDDINGS_PROVIDER: EmbeddingsProvider;
   readonly OPENAI_API_KEY: string;
   readonly OPENAI_BASE_URL: string;
@@ -21,12 +19,14 @@ interface AppConfig {
   readonly OPENAI_EMBED_API_KEY: string;
   readonly TEI_ENDPOINT: string;
 
-  // Image processing (optional)
+  readonly LOCAL_EMBED_MODEL: string;
+  readonly LOCAL_EMBED_DIM: number;
+  readonly LOCAL_MODEL_CACHE_DIR: string;
+
   readonly ENABLE_IMAGE_TO_TEXT: boolean;
   readonly IMAGE_TO_TEXT_PROVIDER: string;
   readonly IMAGE_TO_TEXT_MODEL: string;
 
-  // Confluence integration (optional)
   readonly CONFLUENCE_BASE_URL: string;
   readonly CONFLUENCE_EMAIL: string;
   readonly CONFLUENCE_API_TOKEN: string;
@@ -36,7 +36,6 @@ interface AppConfig {
   readonly CONFLUENCE_TITLE_INCLUDES: readonly string[];
   readonly CONFLUENCE_TITLE_EXCLUDES: readonly string[];
 
-  // Legacy config (for backward compatibility)
   readonly FILE_ROOTS: readonly string[];
   readonly FILE_INCLUDE_GLOBS: readonly string[];
   readonly FILE_EXCLUDE_GLOBS: readonly string[];
@@ -51,10 +50,10 @@ function splitCsv(v: string | undefined, def: string): readonly string[] {
 }
 
 function validateEmbeddingsProvider(provider: string): EmbeddingsProvider {
-  if (provider === 'openai' || provider === 'tei') {
+  if (provider === 'local' || provider === 'openai' || provider === 'tei') {
     return provider;
   }
-  return 'openai';
+  return 'local';
 }
 
 function validateConfluenceAuthMethod(method: string): ConfluenceAuthMethod {
@@ -68,24 +67,20 @@ let _config: AppConfig | null = null;
 
 function initializeConfig(): AppConfig {
   if (_config === null) {
-    // Load default .env file if it exists (for MCP server and other non-CLI usage)
     dotenv.config();
 
-    // Fixed data directory structure
     const dataDir = process.env.DOCSEARCH_DATA_DIR || './data';
     const docsDir = join(dataDir, 'docs');
     const urlsFile = join(dataDir, 'urls.md');
-    const dbPath = join(dataDir, 'index.db');
+    const dbPath = process.env.DB_PATH || join(dataDir, 'index');
 
     _config = {
-      // Fixed paths
       DATA_DIR: dataDir,
       DOCS_DIR: docsDir,
       URLS_FILE: urlsFile,
       DB_PATH: dbPath,
 
-      // Embeddings
-      EMBEDDINGS_PROVIDER: validateEmbeddingsProvider(process.env.EMBEDDINGS_PROVIDER || 'openai'),
+      EMBEDDINGS_PROVIDER: validateEmbeddingsProvider(process.env.EMBEDDINGS_PROVIDER || 'local'),
       OPENAI_API_KEY: process.env.OPENAI_API_KEY || '',
       OPENAI_BASE_URL: process.env.OPENAI_BASE_URL || '',
       OPENAI_EMBED_MODEL: process.env.OPENAI_EMBED_MODEL || 'text-embedding-3-small',
@@ -94,12 +89,14 @@ function initializeConfig(): AppConfig {
       OPENAI_EMBED_API_KEY: process.env.OPENAI_EMBED_API_KEY || process.env.OPENAI_API_KEY || '',
       TEI_ENDPOINT: process.env.TEI_ENDPOINT || '',
 
-      // Image processing
+      LOCAL_EMBED_MODEL: process.env.LOCAL_EMBED_MODEL || 'Xenova/all-MiniLM-L6-v2',
+      LOCAL_EMBED_DIM: parseInt(process.env.LOCAL_EMBED_DIM || '384', 10),
+      LOCAL_MODEL_CACHE_DIR: process.env.LOCAL_MODEL_CACHE_DIR || './model-cache',
+
       ENABLE_IMAGE_TO_TEXT: process.env.ENABLE_IMAGE_TO_TEXT === 'true',
       IMAGE_TO_TEXT_PROVIDER: process.env.IMAGE_TO_TEXT_PROVIDER || 'openai',
       IMAGE_TO_TEXT_MODEL: process.env.IMAGE_TO_TEXT_MODEL || 'gpt-4o-mini',
 
-      // Confluence (optional)
       CONFLUENCE_BASE_URL: process.env.CONFLUENCE_BASE_URL || '',
       CONFLUENCE_EMAIL: process.env.CONFLUENCE_EMAIL || '',
       CONFLUENCE_API_TOKEN: process.env.CONFLUENCE_API_TOKEN || '',
@@ -111,7 +108,6 @@ function initializeConfig(): AppConfig {
       CONFLUENCE_TITLE_INCLUDES: splitCsv(process.env.CONFLUENCE_TITLE_INCLUDES, ''),
       CONFLUENCE_TITLE_EXCLUDES: splitCsv(process.env.CONFLUENCE_TITLE_EXCLUDES, ''),
 
-      // Legacy file config (use DOCS_DIR instead, kept for backward compatibility)
       FILE_ROOTS: splitCsv(process.env.FILE_ROOTS, docsDir),
       FILE_INCLUDE_GLOBS: splitCsv(
         process.env.FILE_INCLUDE_GLOBS,
@@ -127,7 +123,7 @@ function initializeConfig(): AppConfig {
 }
 
 export const CONFIG = new Proxy({} as AppConfig, {
-  get(target, prop: keyof AppConfig) {
+  get(_target, prop: keyof AppConfig) {
     return initializeConfig()[prop];
   },
 });

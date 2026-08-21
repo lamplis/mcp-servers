@@ -4,7 +4,7 @@ import path from 'node:path';
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 
-import { SqliteAdapter } from '../src/ingest/adapters/sqlite.js';
+import { JsonAdapter } from '../src/ingest/adapters/json.js';
 import { ChangeTracker } from '../src/ingest/change-tracker.js';
 import { IncrementalIndexer } from '../src/ingest/incremental-indexer.js';
 import { ingestSingleFileIncremental } from '../src/ingest/sources/files-incremental.js';
@@ -171,15 +171,15 @@ describe('ChangeTracker', () => {
 
 describe('IncrementalIndexer', () => {
   let testDir: string;
-  let adapter: SqliteAdapter;
+  let adapter: JsonAdapter;
   let indexer: IncrementalIndexer;
 
   beforeEach(async () => {
     testDir = path.join(tmpdir(), `test-incremental-${Date.now()}`);
     mkdirSync(testDir, { recursive: true });
 
-    adapter = new SqliteAdapter({
-      path: path.join(testDir, 'test.db'),
+    adapter = new JsonAdapter({
+      path: path.join(testDir, 'index'),
       embeddingDim: 1536,
     });
     await adapter.init();
@@ -265,14 +265,14 @@ describe('IncrementalIndexer', () => {
 
 describe('Incremental File Ingestion', () => {
   let testDir: string;
-  let adapter: SqliteAdapter;
+  let adapter: JsonAdapter;
 
   beforeEach(async () => {
     testDir = path.join(tmpdir(), `test-ingest-incremental-${Date.now()}`);
     mkdirSync(testDir, { recursive: true });
 
-    adapter = new SqliteAdapter({
-      path: path.join(testDir, 'test.db'),
+    adapter = new JsonAdapter({
+      path: path.join(testDir, 'index'),
       embeddingDim: 1536,
     });
     await adapter.init();

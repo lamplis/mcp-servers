@@ -42,8 +42,8 @@ vi.mock('../../src/shared/config.js', () => ({
     FILE_ROOTS: ['./test/fixtures-cli-images'],
     FILE_INCLUDE_GLOBS: ['**/*.{png,jpg,jpeg,gif,svg,webp,md,txt,json}'],
     FILE_EXCLUDE_GLOBS: ['**/node_modules/**', '**/.git/**'],
-    DB_TYPE: 'sqlite',
-    DB_PATH: './test/test-cli-image-search.db',
+    DB_TYPE: 'json',
+    DB_PATH: './test/test-cli-image-search-index',
     POSTGRES_CONNECTION_STRING: '',
   },
 }));
@@ -54,7 +54,7 @@ vi.mock('../../src/shared/config.js', () => ({
  */
 describe('CLI Image Search Integration', () => {
   const testFixturesDir = './test/fixtures-cli-images';
-  const testDbFile = './test/test-cli-image-search.db';
+  const testDbFile = './test/test-cli-image-search-index';
 
   const createTestFiles = () => {
     // Create test image files
@@ -90,7 +90,7 @@ describe('CLI Image Search Integration', () => {
     const cliPath = './dist/src/cli/main.js';
     if (!existsSync(cliPath)) {
       console.log('Building project for CLI tests...');
-      await runCommand('pnpm', ['build'], { timeout: 60000 });
+      await runCommand('npm', ['run', 'build'], { timeout: 60000 });
     }
   });
 
@@ -103,7 +103,7 @@ describe('CLI Image Search Integration', () => {
 
     // Remove test database if exists
     if (existsSync(testDbFile)) {
-      rmSync(testDbFile);
+      rmSync(testDbFile, { recursive: true, force: true });
     }
 
     createTestFiles();
@@ -115,7 +115,7 @@ describe('CLI Image Search Integration', () => {
       rmSync(testFixturesDir, { recursive: true });
     }
     if (existsSync(testDbFile)) {
-      rmSync(testDbFile);
+      rmSync(testDbFile, { recursive: true, force: true });
     }
   });
 

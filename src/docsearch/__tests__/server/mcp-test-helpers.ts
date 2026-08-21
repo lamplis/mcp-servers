@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import { SqliteAdapter } from '../../src/ingest/adapters/sqlite.js';
+import { JsonAdapter } from '../../src/ingest/adapters/json.js';
 import { performSearch } from '../../src/ingest/search.js';
 import { testDbPath } from '../setup.js';
 
@@ -38,7 +38,7 @@ export async function resourceHandler(uri: string) {
   }
 
   const id = match[1];
-  const adapter = new SqliteAdapter({ path: testDbPath, embeddingDim: 1536 });
+  const adapter = new JsonAdapter({ path: testDbPath, embeddingDim: 1536 });
   await adapter.init();
 
   try {
@@ -73,7 +73,7 @@ export async function searchTool(input: SearchToolInput) {
 
   const validatedInput = schema.parse(input);
 
-  const adapter = new SqliteAdapter({ path: testDbPath, embeddingDim: 1536 });
+  const adapter = new JsonAdapter({ path: testDbPath, embeddingDim: 1536 });
   await adapter.init();
 
   try {

@@ -307,6 +307,17 @@ cython_debug/
 # Cursor local metadata
 .cursor/
 
+# Generated Roo MCP config (absolute local paths; regenerate with python scripts/setup_roo.py)
+.roo/mcp.json
 
 # Fake Qdrant local data (vector store)
 src/fake-qdrant/data/
+
+# Runtime JSON / leftover SQLite indexes (do not commit)
+data/**/*.db
+data/**/*.db-wal
+data/**/*.db-shm
+data/docsearch/index/
+
+# Transformers.js weights (populate locally via prefetch_model)
+model-cache/

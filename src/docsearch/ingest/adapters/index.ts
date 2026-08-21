@@ -1,3 +1,3 @@
 export * from './types.js';
-export * from './sqlite.js';
+export * from './json.js';
 export * from './factory.js';

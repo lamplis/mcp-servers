@@ -126,7 +126,6 @@ describe("createProvider", () => {
     httpHost: "127.0.0.1",
     httpPort: 6333,
     dataDir: "./data",
-    sqliteVecDir: null,
     embeddingProvider: "local",
     embeddingBaseUrl: null,
     embeddingModel: null,

@@ -1,15 +1,15 @@
 # docsearch-mcp (Local Fork)
 
-100% local document search MCP server using SQLite + sqlite-vec. No Docker, no external databases, no cloud services required. Fully offline after initial model download.
+100% local document search MCP server using JSON files (no SQLite). No Docker, no external databases, no cloud services required. Fully offline after initial model download.
 
 ## Features
 
 - **Offline-First**: Uses local transformer models for embeddings - no API keys required
-- **Hybrid Search**: Combines full-text search (FTS5) with vector similarity for optimal results
+- **Hybrid Search**: Combines keyword token overlap with vector similarity
 - **Multi-Source Indexing**: Local files, web pages (URLs), and Confluence (optional)
 - **Automatic Indexing**: Server auto-indexes on startup
 - **Simple Setup**: Just drop files in a folder and add URLs to a text file
-- **100% Local Storage**: SQLite database with sqlite-vec extension
+- **100% Local Storage**: JSON index files (no database binaries)
 - **PDF Support**: Extract and search text from PDF documents
 - **Image Support**: Optional AI-powered image description and search
 
@@ -37,7 +37,7 @@ The server uses a simple folder structure:
   │   └── code/
   │       └── example.ts
   ├── urls.md         # List URLs to fetch and index
-  └── index.db        # SQLite database (auto-created)
+  └── index/          # JSON index (auto-created; not SQLite)
 ```
 
 **For local files**: Simply drop them in `./data/docs/`
@@ -100,9 +100,30 @@ Changes are debounced (waits 2 seconds after last change before reindexing).
 
 ## MCP Configuration
 
-### VS Code / Cursor
+### VS Code / Cursor / RooCode
 
-Add to `.vscode/mcp.json` or `.cursor/mcp.json`:
+Preferred on locked-down Windows (no compiled `dist/` required):
+
+```json
+{
+  "mcpServers": {
+    "central-docsearch": {
+      "command": "npx",
+      "args": ["tsx", "src/docsearch/index.ts"],
+      "cwd": "C:\\DEVHOME\\GITHUB\\mcp-servers",
+      "env": {
+        "EMBEDDINGS_PROVIDER": "local",
+        "DOCSEARCH_DATA_DIR": "C:\\DEVHOME\\GITHUB\\mcp-servers\\data\\docsearch",
+        "LOCAL_MODEL_CACHE_DIR": "C:\\DEVHOME\\GITHUB\\mcp-servers\\model-cache"
+      }
+    }
+  }
+}
+```
+
+Or run `python scripts/setup_roo.py` from the repo root.
+
+Built `dist/` entry (optional):
 
 ```json
 {
@@ -251,18 +272,18 @@ docsearch start
 
 ## How It Works
 
-1. **Indexing**: Documents are split into chunks and stored in SQLite
+1. **Indexing**: Documents are split into chunks and stored as JSON
 2. **Embeddings**: Each chunk gets a vector embedding for semantic search
    - Default: Local transformer model (`Xenova/all-MiniLM-L6-v2`) - no API required
    - Optional: OpenAI embeddings (requires API key)
-3. **FTS5**: Full-text search index for keyword matching
+3. **Keyword search**: Token overlap in JavaScript (no FTS5 / SQLite)
 4. **Hybrid Search**: Combines vector similarity with keyword matching for best results
 
 ## Switching Embedding Providers
 
 **Important**: Different embedding models produce different dimension vectors. If you switch providers, you must re-index your documents:
 
-1. Delete the existing database: `rm ./data/index.db`
+1. Delete the existing index directory: `Remove-Item -Recurse ./data/index`
 2. Set the new provider: `$env:EMBEDDINGS_PROVIDER = "openai"` (or `"local"`)
 3. Run the server to re-index
 
@@ -283,11 +304,16 @@ The embedding model needs to be downloaded on first use. Make sure you have netw
 - Check that `./data/urls.md` contains valid URLs
 - Run `docsearch ingest all` to manually trigger indexing
 
-### "sqlite-vec not loading"
+### Leftover `index.db` files
 
-The `sqlite-vec` extension requires native compilation. Ensure you have:
-- Node.js 18+ 
-- Build tools for your platform (usually included with Node.js)
+SQLite files from older versions cannot be opened on this workstation. Delete `index.db*` and re-ingest documents so they are stored as JSON under `{DOCSEARCH_DATA_DIR}/index/` (in this repo: `data/docsearch/index/`).
+
+From the repo root you can confirm the MCP process starts:
+
+```powershell
+python scripts/setup_roo.py --check
+node scripts/validate_mcps.mjs
+```
 
 ## License
 

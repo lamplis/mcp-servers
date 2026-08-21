@@ -209,10 +209,30 @@ Report server status, model state, and runtime information.
 |---------------------|----------------------------|--------------------------------------------------|
 | `MODEL_ID`          | `Xenova/all-MiniLM-L6-v2`  | Default embedding model                          |
 | `MODEL_CACHE_DIR`   | `./model-cache`            | Directory for cached model files                 |
+| `MODEL_ASSETS_DIR`  | (unset)                    | Alternate model assets directory                 |
+| `EMBEDDINGS_HTTP_PORT` | (unset)                 | If set, start OpenAI-compatible HTTP on that port |
+| `EMBEDDINGS_HTTP_HOST` | `127.0.0.1`             | HTTP sidecar bind host                           |
 | `EMBED_CACHE_SIZE`  | `1000`                     | Maximum entries in the LRU embedding cache       |
 | `EMBED_CONCURRENCY` | `2`                        | Maximum concurrent embedding operations          |
 | `MAX_CHARS`         | `20000`                    | Maximum characters per input text                |
 | `MAX_BATCH`         | `64`                       | Maximum texts per batch request                  |
+
+### Optional HTTP sidecar
+
+If `EMBEDDINGS_HTTP_PORT` is set, the process also binds an OpenAI-compatible HTTP server on loopback (CPU Transformers.js only):
+
+- `GET /healthz`
+- `POST /v1/embeddings`
+
+Example:
+
+```powershell
+$env:EMBEDDINGS_HTTP_PORT = "3100"
+$env:EMBEDDINGS_HTTP_HOST = "127.0.0.1"
+npx tsx src/local-embeddings/index.ts
+```
+
+If the port is already in use, stdio MCP still starts; the sidecar logs a warning and is skipped.
 
 ### Recommended Models
 
@@ -296,8 +316,9 @@ This is expected. The model must be loaded into memory on first use. Subsequent 
 
 ```
 src/local-embeddings/
-├── index.ts        # Entry point (stdio transport)
-├── server.ts       # MCP server and tool registration
+├── index.ts            # Entry point (stdio + optional HTTP sidecar)
+├── embeddings-http.ts  # OpenAI-compatible POST /v1/embeddings
+├── server.ts           # MCP server and tool registration
 ├── embedder.ts     # Model loading and embedding logic
 ├── lru.ts          # LRU cache implementation
 ├── semaphore.ts    # Concurrency limiter
@@ -310,6 +331,12 @@ src/local-embeddings/
 
 ```powershell
 npx tsx src/local-embeddings/index.ts
+```
+
+From the repo root, smoke-test with the rest of the Roo set:
+
+```powershell
+node scripts/validate_mcps.mjs
 ```
 
 ### Building

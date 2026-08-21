@@ -41,7 +41,7 @@ program
 // Global options
 program
   .option('-c, --config <file>', 'Configuration file path')
-  .option('--embeddings-provider <provider>', 'Embeddings provider (openai|tei)')
+  .option('--embeddings-provider <provider>', 'Embeddings provider (local|openai|tei)')
   .option('--openai-api-key <key>', 'OpenAI API key')
   .option('--openai-base-url <url>', 'OpenAI base URL')
   .option('--openai-embed-model <model>', 'OpenAI embedding model')
@@ -57,7 +57,7 @@ program
   .option('--file-roots <roots>', 'File roots (comma-separated)')
   .option('--file-include-globs <globs>', 'File include globs (comma-separated)')
   .option('--file-exclude-globs <globs>', 'File exclude globs (comma-separated)')
-  .option('--db-path <path>', 'SQLite database path')
+  .option('--db-path <path>', 'JSON index directory (default: <data-dir>/index)')
   .option('--data-dir <dir>', 'Data directory (default: ./data)');
 
 // Ingest command

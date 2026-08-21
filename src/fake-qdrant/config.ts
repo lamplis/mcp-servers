@@ -5,7 +5,6 @@ export interface FakeQdrantConfig {
   httpHost: string;
   httpPort: number;
   dataDir: string;
-  sqliteVecDir: string | null;
   embeddingProvider: EmbeddingProviderMode;
   embeddingBaseUrl: string | null;
   embeddingModel: string | null;
@@ -35,7 +34,6 @@ export function loadConfig(
     httpHost: env.FAKE_QDRANT_HTTP_HOST ?? "127.0.0.1",
     httpPort: parsePort(env.FAKE_QDRANT_HTTP_PORT, 6333),
     dataDir: env.FAKE_QDRANT_DATA_DIR ?? "./data/fake-qdrant",
-    sqliteVecDir: env.FAKE_QDRANT_SQLITE_VEC_DIR ?? null,
     embeddingProvider: provider,
     embeddingBaseUrl,
     embeddingModel,

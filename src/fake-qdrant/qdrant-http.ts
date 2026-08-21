@@ -347,7 +347,7 @@ async function handleRequest(
     }
   }
 
-  // Non-standard: POST /collections/<name>/compact (dedupe + rebuild HNSW)
+  // Non-standard: POST /collections/<name>/compact (rewrite unique JSONL snapshot)
   if (req.method === "POST" && remainder === "/compact") {
     try {
       const count = await store.compactCollection(collectionName);

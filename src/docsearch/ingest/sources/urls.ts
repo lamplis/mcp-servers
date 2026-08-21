@@ -246,6 +246,18 @@ interface CrawledPage {
   html: string;
 }
 
+function isHtmlContentType(contentType: string): boolean {
+  return contentType.includes('text/html') || contentType.includes('application/xhtml');
+}
+
+function isPlainTextContentType(contentType: string): boolean {
+  return (
+    contentType.includes('text/plain') ||
+    contentType.includes('text/markdown') ||
+    contentType.includes('text/x-markdown')
+  );
+}
+
 /**
  * Extract title from plain-text content (first non-empty line, stripped of
  * leading '#' if present). Falls back to the URL path.
@@ -373,17 +385,7 @@ async function crawlSite(startUrl: string): Promise<CrawledPage[]> {
  */
 async function getLastCrawlTime(adapter: DatabaseAdapter, startUrl: string): Promise<number | null> {
   try {
-    // Find documents that were crawled from this starting URL
-    const results = await adapter.rawQuery(
-      `SELECT MAX(mtime) as last_crawl FROM documents WHERE extra_json LIKE ?`,
-      [`%"crawledFrom":"${startUrl}"%`]
-    );
-    
-    if (results && results.length > 0) {
-      const row = results[0] as { last_crawl: number | null };
-      return row.last_crawl;
-    }
-    return null;
+    return await adapter.getLastCrawlTime(startUrl);
   } catch {
     return null;
   }

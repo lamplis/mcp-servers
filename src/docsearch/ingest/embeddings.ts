@@ -1,6 +1,10 @@
+import path from 'node:path';
 import { fetch } from 'undici';
+import { env, pipeline } from '@xenova/transformers';
 
 import { CONFIG } from '../shared/config.js';
+
+type FeatureExtractionPipeline = Awaited<ReturnType<typeof pipeline>>;
 
 export interface Embedder {
   readonly dim: number;
@@ -182,20 +186,195 @@ export class NoOpEmbedder implements Embedder {
   public readonly dim: number = 1536;
 
   async embed(texts: readonly string[]): Promise<readonly Float32Array[]> {
-    // Return zero vectors for testing/when no embeddings are needed
     return texts.map(() => new Float32Array(this.dim).fill(0.1));
   }
 }
 
+let localModelPromise: Promise<FeatureExtractionPipeline> | null = null;
+let localModelId: string | null = null;
+
+export class LocalEmbedder implements Embedder {
+  public readonly dim: number;
+  private readonly modelId: string;
+  private readonly cacheDir: string;
+  private initialized = false;
+
+  constructor() {
+    this.modelId = CONFIG.LOCAL_EMBED_MODEL;
+    this.dim = CONFIG.LOCAL_EMBED_DIM;
+    this.cacheDir = path.resolve(process.cwd(), CONFIG.LOCAL_MODEL_CACHE_DIR);
+  }
+
+  private initializeEnv(): void {
+    if (this.initialized) {
+      return;
+    }
+    env.cacheDir = this.cacheDir;
+    env.allowLocalModels = true;
+    env.useBrowserCache = false;
+    env.allowRemoteModels = false;
+    this.initialized = true;
+  }
+
+  private async getPipeline(): Promise<FeatureExtractionPipeline> {
+    this.initializeEnv();
+    if (localModelPromise && localModelId === this.modelId) {
+      return localModelPromise;
+    }
+    localModelId = this.modelId;
+    localModelPromise = pipeline('feature-extraction', this.modelId);
+    localModelPromise.catch(() => {
+      localModelPromise = null;
+      localModelId = null;
+    });
+    return localModelPromise;
+  }
+
+  async embed(texts: readonly string[]): Promise<readonly Float32Array[]> {
+    if (texts.length === 0) {
+      return [];
+    }
+    try {
+      const model = await this.getPipeline();
+      const inputTexts = [...texts] as string[];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const result = await (model as any)(inputTexts, {
+        pooling: 'mean',
+        normalize: true,
+      });
+      return this.coerceToFloat32Arrays(result, texts.length);
+    } catch (error) {
+      if (this.isMissingModelError(error)) {
+        throw new Error(
+          `Model "${this.modelId}" not found in cache directory "${this.cacheDir}". ` +
+            `Download it first with network access, then use offline.`,
+        );
+      }
+      throw error;
+    }
+  }
+
+  private coerceToFloat32Arrays(result: unknown, expected: number): Float32Array[] {
+    if (Array.isArray(result)) {
+      if (result.length === 0) {
+        return [];
+      }
+      const first = result[0];
+      if (first instanceof Float32Array) {
+        return result as Float32Array[];
+      }
+      if (typeof first === 'number') {
+        return [new Float32Array(result as number[])];
+      }
+      return result.map((item) => this.toFloat32Array(item));
+    }
+    const tensor = result as { data?: Float32Array; dims?: number[] } | null;
+    if (tensor?.data && tensor?.dims) {
+      return this.fromTensor(tensor.data, tensor.dims);
+    }
+    if (expected === 1) {
+      return [this.toFloat32Array(result)];
+    }
+    throw new Error('Unexpected embedding output format');
+  }
+
+  private toFloat32Array(value: unknown): Float32Array {
+    if (value instanceof Float32Array) {
+      return value;
+    }
+    if (Array.isArray(value)) {
+      if (value.length > 0 && Array.isArray(value[0])) {
+        const tokens = value as number[][];
+        const dim = tokens[0]?.length ?? 0;
+        const sums = new Float32Array(dim);
+        for (const token of tokens) {
+          for (let i = 0; i < dim; i++) {
+            sums[i] = (sums[i] ?? 0) + (token[i] ?? 0);
+          }
+        }
+        for (let i = 0; i < dim; i++) {
+          sums[i] = (sums[i] ?? 0) / tokens.length;
+        }
+        return sums;
+      }
+      return new Float32Array(value as number[]);
+    }
+    const tensor = value as { data?: Float32Array; dims?: number[] } | null;
+    if (tensor?.data && tensor?.dims) {
+      return this.fromTensor(tensor.data, tensor.dims)[0] ?? new Float32Array(this.dim);
+    }
+    throw new Error('Unsupported embedding output format');
+  }
+
+  private fromTensor(data: Float32Array, dims: number[]): Float32Array[] {
+    if (dims.length === 2) {
+      const batchSize = dims[0] ?? 0;
+      const hiddenSize = dims[1] ?? 0;
+      const vectors: Float32Array[] = [];
+      for (let i = 0; i < batchSize; i++) {
+        const start = i * hiddenSize;
+        vectors.push(data.slice(start, start + hiddenSize));
+      }
+      return vectors;
+    }
+    if (dims.length === 3) {
+      const batchSize = dims[0] ?? 0;
+      const tokenCount = dims[1] ?? 0;
+      const hiddenSize = dims[2] ?? 0;
+      const vectors: Float32Array[] = [];
+      let offset = 0;
+      for (let b = 0; b < batchSize; b++) {
+        const pooled = new Float32Array(hiddenSize);
+        for (let t = 0; t < tokenCount; t++) {
+          for (let h = 0; h < hiddenSize; h++) {
+            pooled[h] = (pooled[h] ?? 0) + (data[offset + h] ?? 0);
+          }
+          offset += hiddenSize;
+        }
+        for (let h = 0; h < hiddenSize; h++) {
+          pooled[h] = (pooled[h] ?? 0) / tokenCount;
+        }
+        vectors.push(pooled);
+      }
+      return vectors;
+    }
+    throw new Error('Unsupported tensor dimensions for embeddings');
+  }
+
+  private isMissingModelError(error: unknown): boolean {
+    if (!(error instanceof Error)) {
+      return false;
+    }
+    const message = error.message.toLowerCase();
+    return (
+      message.includes('local model') ||
+      message.includes('not found') ||
+      message.includes('no such file') ||
+      message.includes('missing files')
+    );
+  }
+}
+
+export function getEmbeddingDimension(): number {
+  if (CONFIG.EMBEDDINGS_PROVIDER === 'local') {
+    return CONFIG.LOCAL_EMBED_DIM;
+  }
+  return CONFIG.OPENAI_EMBED_DIM;
+}
+
 export function getEmbedder(): Embedder {
+  if (CONFIG.EMBEDDINGS_PROVIDER === 'local') {
+    return new LocalEmbedder();
+  }
   if (CONFIG.EMBEDDINGS_PROVIDER === 'tei') {
     return new TEIEmbedder();
   }
-
-  if (CONFIG.OPENAI_EMBED_API_KEY || CONFIG.OPENAI_API_KEY) {
+  if (CONFIG.EMBEDDINGS_PROVIDER === 'openai') {
+    if (!(CONFIG.OPENAI_EMBED_API_KEY || CONFIG.OPENAI_API_KEY)) {
+      console.warn('OPENAI_EMBED_API_KEY missing; using no-op embedder');
+      return new NoOpEmbedder();
+    }
     return new OpenAIEmbedder();
   }
-
-  console.warn('No embeddings provider configured, using no-op embedder');
-  return new NoOpEmbedder();
+  return new LocalEmbedder();
 }

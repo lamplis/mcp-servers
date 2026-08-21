@@ -93,6 +93,9 @@ async function runVectorSearch(
   filters: SearchFilters,
 ): Promise<SearchResult[]> {
   const embedder = getEmbedder();
+  if (!embedder?.embed) {
+    return [];
+  }
   const queryEmbedding = await embedder.embed([normalizedQuery]);
   const firstEmbedding = queryEmbedding[0];
   if (!firstEmbedding) {

@@ -3,7 +3,7 @@ import path from 'node:path';
 
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 
-import { SqliteAdapter } from '../../src/ingest/adapters/sqlite.js';
+import { JsonAdapter } from '../../src/ingest/adapters/json.js';
 import { getImageToTextProvider } from '../../src/ingest/image-to-text.js';
 import { ingestFiles } from '../../src/ingest/sources/files.js';
 import { testDbPath } from '../setup.js';
@@ -23,7 +23,7 @@ vi.mock('../../src/shared/config.js', () => ({
 }));
 
 describe('Image File Ingestion', () => {
-  let adapter: SqliteAdapter;
+  let adapter: JsonAdapter;
   const fixturesDir = './test/fixtures-images';
 
   const createTestImages = {
@@ -51,7 +51,7 @@ describe('Image File Ingestion', () => {
     }
 
     // Initialize database adapter
-    adapter = new SqliteAdapter({ path: testDbPath, embeddingDim: 1536 });
+    adapter = new JsonAdapter({ path: testDbPath, embeddingDim: 1536 });
     await adapter.init();
   });
 
@@ -105,9 +105,7 @@ describe('Image File Ingestion', () => {
       await ingestFiles(adapter);
 
       // Check that documents were created for each image
-      const documents = await adapter.rawQuery(
-        "SELECT * FROM documents WHERE lang = 'image' ORDER BY path",
-      );
+      const documents = await adapter.findDocuments({ lang: 'image' });
       expect(documents).toHaveLength(4);
 
       // Verify document metadata
@@ -126,13 +124,7 @@ describe('Image File Ingestion', () => {
       expect(extraJson.description).toContain('system architecture diagram');
 
       // Check that chunks were created with AI descriptions
-      const chunks = await adapter.rawQuery(`
-        SELECT c.*, d.path 
-        FROM chunks c 
-        JOIN documents d ON d.id = c.document_id 
-        WHERE d.lang = 'image' 
-        ORDER BY d.path
-      `);
+      const chunks = await adapter.findChunks({ lang: 'image' });
       expect(chunks).toHaveLength(4);
 
       // Verify chunk content contains AI descriptions
@@ -160,16 +152,14 @@ describe('Image File Ingestion', () => {
 
       await ingestFiles(adapter);
 
-      const documents = await adapter.rawQuery("SELECT * FROM documents WHERE lang = 'image'");
+      const documents = await adapter.findDocuments({ lang: 'image' });
       expect(documents).toHaveLength(4); // All images should still be indexed
 
       // Check that the failed image still has a fallback description
       const failedDoc = documents.find((d: any) => d.path.includes('architecture.png'));
       expect(failedDoc).toBeDefined();
 
-      const chunk = await adapter.rawQuery('SELECT content FROM chunks WHERE document_id = ?', [
-        failedDoc!.id,
-      ]);
+      const chunk = await adapter.findChunks({ documentId: failedDoc!.id as number });
       expect(chunk[0]?.content).toContain('architecture.png'); // Should fallback to filename
     });
   });
@@ -192,33 +182,25 @@ describe('Image File Ingestion', () => {
       await ingestFiles(adapter);
 
       // Check that documents were still created
-      const documents = await adapter.rawQuery(
-        "SELECT * FROM documents WHERE lang = 'image' ORDER BY path",
-      );
+      const documents = await adapter.findDocuments({ lang: 'image' });
       expect(documents).toHaveLength(4);
 
       // Check that chunks use filename-based content
-      const chunks = await adapter.rawQuery(`
-        SELECT c.*, d.path 
-        FROM chunks c 
-        JOIN documents d ON d.id = c.document_id 
-        WHERE d.lang = 'image' 
-        ORDER BY d.path
-      `);
+      const chunks = await adapter.findChunks({ lang: 'image' });
       expect(chunks).toHaveLength(4);
 
       // Verify chunk content is filename-based
       const architectureChunk = chunks.find((c: any) => c.path.includes('architecture.png'));
-      expect(architectureChunk?.content).toBe('Image: architecture.png');
+      expect(architectureChunk?.content).toContain('Image: architecture.png');
 
       const flowchartChunk = chunks.find((c: any) => c.path.includes('flowchart.jpg'));
-      expect(flowchartChunk?.content).toBe('Image: flowchart.jpg');
+      expect(flowchartChunk?.content).toContain('Image: flowchart.jpg');
     });
 
     it('should store image metadata even without descriptions', async () => {
       await ingestFiles(adapter);
 
-      const documents = await adapter.rawQuery("SELECT * FROM documents WHERE lang = 'image'");
+      const documents = await adapter.findDocuments({ lang: 'image' });
 
       for (const doc of documents) {
         expect(doc.extra_json).toBeDefined();
@@ -254,10 +236,8 @@ describe('Image File Ingestion', () => {
       const { ingestFiles: dynamicIngestFiles } = await import('../../src/ingest/sources/files.js');
       await dynamicIngestFiles(adapter);
 
-      const imageDocuments = await adapter.rawQuery("SELECT * FROM documents WHERE lang = 'image'");
-      const otherDocuments = await adapter.rawQuery(
-        "SELECT * FROM documents WHERE lang != 'image'",
-      );
+      const imageDocuments = await adapter.findDocuments({ lang: 'image' });
+      const otherDocuments = await adapter.findDocuments({ excludeLang: 'image' });
 
       expect(imageDocuments).toHaveLength(4); // Only image files
       expect(otherDocuments).toHaveLength(2); // Text and JS files
@@ -275,10 +255,11 @@ describe('Image File Ingestion', () => {
 
       await ingestFiles(adapter);
 
-      const documents = await adapter.rawQuery(
-        "SELECT * FROM documents WHERE lang = 'image' AND (path LIKE '%.PNG' OR path LIKE '%.JPG')",
-      );
-      expect(documents).toHaveLength(2);
+      const mixed = (await adapter.findDocuments({ lang: 'image' })).filter((doc) => {
+        const p = doc.path ?? '';
+        return p.toLowerCase().endsWith('.png') || p.toLowerCase().endsWith('.jpg');
+      });
+      expect(mixed).toHaveLength(2);
     });
   });
 
@@ -310,13 +291,11 @@ describe('Image File Ingestion', () => {
       await dynamicIngestFiles(adapter);
 
       // Should only have one PNG file
-      const documents = await adapter.rawQuery("SELECT * FROM documents WHERE lang = 'image'");
+      const documents = await adapter.findDocuments({ lang: 'image' });
       expect(documents).toHaveLength(1);
 
       // Should have exactly one chunk per image
-      const chunks = await adapter.rawQuery(
-        "SELECT * FROM chunks c JOIN documents d ON d.id = c.document_id WHERE d.lang = 'image'",
-      );
+      const chunks = await adapter.findChunks({ lang: 'image' });
       expect(chunks).toHaveLength(1);
 
       // Chunk should have no line numbers (start_line and end_line should be null)

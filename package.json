@@ -16,7 +16,8 @@
     "build": "npm run build --workspaces",
     "watch": "npm run watch --workspaces",
     "publish-all": "npm publish --workspaces --access public",
-    "link-all": "npm link --workspaces"
+    "link-all": "npm link --workspaces",
+    "validate:mcp": "node scripts/validate_mcps.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/server-docsearch": "*",
@@ -25,6 +26,6 @@
     "@modelcontextprotocol/server-local-embeddings": "*",
     "@modelcontextprotocol/server-memory": "*",
     "@modelcontextprotocol/server-sequential-thinking": "*",
-    "express": "^5.2.1"
+    "@modelcontextprotocol/server-fake-qdrant": "*"
   }
 }

@@ -56,7 +56,7 @@ export class EnvConfigProvider implements ConfigurationProvider {
   private buildConfiguration(): Configuration {
     // Determine data directory
     const dataDir = this.overrides.dataDir || process.env.DOCSEARCH_DATA_DIR || './data';
-    const defaultDbPath = path.join(dataDir, 'index.db');
+    const defaultDbPath = path.join(dataDir, 'index');
 
     return {
       embeddings: {

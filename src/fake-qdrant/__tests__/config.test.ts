@@ -8,7 +8,6 @@ describe("loadConfig", () => {
     expect(config.httpHost).toBe("127.0.0.1");
     expect(config.httpPort).toBe(6333);
     expect(config.dataDir).toBe("./data/fake-qdrant");
-    expect(config.sqliteVecDir).toBeNull();
     expect(config.embeddingProvider).toBe("local");
     expect(config.embeddingBaseUrl).toBeNull();
     expect(config.embeddingModel).toBeNull();
@@ -37,11 +36,6 @@ describe("loadConfig", () => {
   it("should parse data dir", () => {
     const config = loadConfig({ FAKE_QDRANT_DATA_DIR: "/tmp/vectors" });
     expect(config.dataDir).toBe("/tmp/vectors");
-  });
-
-  it("should parse sqlite vec dir", () => {
-    const config = loadConfig({ FAKE_QDRANT_SQLITE_VEC_DIR: "./vendor/sqlite-vec" });
-    expect(config.sqliteVecDir).toBe("./vendor/sqlite-vec");
   });
 
   it("should parse local embedding provider", () => {

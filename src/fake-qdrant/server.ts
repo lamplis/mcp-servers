@@ -233,7 +233,7 @@ function registerTools(
     {
       title: "Query fake Qdrant collection",
       description:
-        "Run a vector similarity search against a collection (uses HNSW by default).",
+        "Run a vector similarity search against a collection (brute-force cosine).",
       inputSchema: {
         collection: z.string().describe("Collection name."),
         vector: z.array(z.number()).describe("Query vector."),
@@ -275,7 +275,7 @@ function registerTools(
     {
       title: "Compact fake Qdrant collection",
       description:
-        "Deduplicate the points file (latest id wins) and rebuild the HNSW index. Use this periodically to free disk space and speed up startup.",
+        "Rewrite the collection JSONL snapshot (latest id wins). Use this periodically to free disk space and speed up startup.",
       inputSchema: {
         name: z.string().describe("Collection name to compact."),
       },
@@ -300,9 +300,9 @@ function registerTools(
   server.registerTool(
     "fake_qdrant_persist_indexes",
     {
-      title: "Persist HNSW indexes",
+      title: "Persist collection files",
       description:
-        "Write all dirty in-memory HNSW indexes to disk. Useful before shutdown.",
+        "Flush dirty in-memory collections to compact JSONL files. Useful before shutdown.",
       inputSchema: {},
       outputSchema: {
         success: z.boolean(),
@@ -312,7 +312,7 @@ function registerTools(
       await store.persistAllIndexes();
       return {
         content: [
-          { type: "text" as const, text: "Persisted all HNSW indexes" },
+          { type: "text" as const, text: "Persisted all collection files" },
         ],
         structuredContent: { success: true },
       };

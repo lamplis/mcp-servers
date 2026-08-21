@@ -33,16 +33,14 @@
       "alwaysAllow": []
     },
     "central-fake-qdrant": {
-      "$comment": "Auto-start: Fake Qdrant vector DB with optional HTTP shim on port 6333",
+      "$comment": "Auto-start: Fake Qdrant JSONL vector store with HTTP shim on port 6333",
       "command": "npx",
       "args": ["tsx", "src/fake-qdrant/index.ts"],
       "cwd": "C:\\DEVHOME\\GITHUB\\mcp-servers",
       "env": {
         "FAKE_QDRANT_ENABLED": "1",
         "FAKE_QDRANT_HTTP_PORT": "6333",
-        "FAKE_QDRANT_DATA_DIR": "./data/fake-qdrant",
-        "FAKE_QDRANT_EMBEDDING_PROVIDER": "local",
-        "FAKE_QDRANT_LOCAL_EMBEDDINGS_TARGET": "http://127.0.0.1:3100"
+        "FAKE_QDRANT_DATA_DIR": "C:\\DEVHOME\\GITHUB\\mcp-servers\\data\\fake-qdrant"
       },
       "disabled": false,
       "alwaysAllow": [
@@ -56,35 +54,34 @@
         "fake_qdrant_persist_indexes"
       ]
     },
-    "central-docsearch": {
-      "$comment": "Auto-start: Document search with centralized embedding server",
-      "command": "npx",
-      "args": ["tsx", "src/docsearch/index.ts"],
-      "cwd": "C:\\DEVHOME\\GITHUB\\mcp-servers",
-      "env": {
-        "DOCSEARCH_DATA_DIR": "C:\\DEVHOME\\GITHUB\\Joomla-1.0\\.roo\\docsearch-data",
-        "EMBEDDINGS_PROVIDER": "openai",
-        "OPENAI_EMBED_API_KEY": "local",
-        "OPENAI_EMBED_BASE_URL": "http://127.0.0.1:3100/v1",
-        "OPENAI_EMBED_MODEL": "Xenova/bge-small-en-v1.5",
-        "OPENAI_EMBED_DIM": "384"
-      },
-      "disabled": false,
-      "alwaysAllow": ["doc-search", "doc-ingest", "doc-ingest-status"]
-    },
     "central-local-embeddings": {
-      "$comment": "Auto-start: Local/offline text embeddings using Transformers.js + HTTP API on port 3100",
+      "$comment": "Auto-start: Local embeddings (Transformers.js) with HTTP on port 3100",
       "command": "npx",
       "args": ["tsx", "src/local-embeddings/index.ts"],
       "cwd": "C:\\DEVHOME\\GITHUB\\mcp-servers",
       "env": {
-        "MODEL_ID": "Xenova/bge-small-en-v1.5",
-        "MODEL_ASSETS_DIR": "./model-cache",
+        "MODEL_ID": "Xenova/all-MiniLM-L6-v2",
+        "MODEL_CACHE_DIR": "C:\\DEVHOME\\GITHUB\\mcp-servers\\model-cache",
+        "MODEL_ASSETS_DIR": "C:\\DEVHOME\\GITHUB\\mcp-servers\\model-cache",
         "EMBEDDINGS_HTTP_PORT": "3100",
         "EMBEDDINGS_HTTP_HOST": "127.0.0.1"
       },
       "disabled": false,
       "alwaysAllow": ["embeddings", "prefetch_model", "health"]
+    },
+    "central-docsearch": {
+      "$comment": "Auto-start: Document search with local embeddings (JSON index, no SQLite)",
+      "command": "npx",
+      "args": ["tsx", "src/docsearch/index.ts"],
+      "cwd": "C:\\DEVHOME\\GITHUB\\mcp-servers",
+      "env": {
+        "EMBEDDINGS_PROVIDER": "local",
+        "DOCSEARCH_DATA_DIR": "C:\\DEVHOME\\GITHUB\\mcp-servers\\data\\docsearch",
+        "LOCAL_EMBED_MODEL": "Xenova/all-MiniLM-L6-v2",
+        "LOCAL_MODEL_CACHE_DIR": "C:\\DEVHOME\\GITHUB\\mcp-servers\\model-cache"
+      },
+      "disabled": false,
+      "alwaysAllow": ["doc-search", "doc-ingest", "doc-ingest-status"]
     }
   }
 }

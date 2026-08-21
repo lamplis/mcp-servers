@@ -112,47 +112,18 @@ export function registerIngestTools(server: McpServer): void {
 }
 
 async function getIndexStats(adapter: DatabaseAdapter, detailed: boolean) {
-  // Get basic stats
-  const documentsCount = await adapter.rawQuery('SELECT COUNT(*) as count FROM documents');
-  const chunksCount = await adapter.rawQuery('SELECT COUNT(*) as count FROM chunks');
-  const embeddedChunksCount = await adapter.rawQuery('SELECT COUNT(*) as count FROM vec_chunks');
-
-  const docCount = (documentsCount[0]?.count as number) || 0;
-  const chunkCount = (chunksCount[0]?.count as number) || 0;
-  const embeddedCount = (embeddedChunksCount[0]?.count as number) || 0;
-
+  const counts = await adapter.getIndexStats();
   const stats = {
-    documents: docCount,
-    chunks: chunkCount,
-    embedded_chunks: embeddedCount,
-    embedding_progress: chunkCount > 0 ? Math.round((embeddedCount / chunkCount) * 100) : 0,
+    documents: counts.documents,
+    chunks: counts.chunks,
+    embedded_chunks: counts.embeddedChunks,
+    embedding_progress:
+      counts.chunks > 0 ? Math.round((counts.embeddedChunks / counts.chunks) * 100) : 0,
   };
 
   if (detailed) {
-    // Get source breakdown
-    const sourceBreakdown = await adapter.rawQuery(`
-      SELECT 
-        source,
-        COUNT(*) as documents,
-        SUM(CASE WHEN c.id IS NOT NULL THEN 1 ELSE 0 END) as chunks
-      FROM documents d
-      LEFT JOIN chunks c ON d.id = c.doc_id
-      GROUP BY source
-    `);
-
-    // Get recent activity
-    const recentActivity = await adapter.rawQuery(`
-      SELECT 
-        title,
-        source,
-        repo,
-        path,
-        mtime
-      FROM documents 
-      ORDER BY mtime DESC 
-      LIMIT 5
-    `);
-
+    const sourceBreakdown = await adapter.getSourceBreakdown();
+    const recentActivity = await adapter.getRecentDocuments(5);
     return {
       ...stats,
       sourceBreakdown,

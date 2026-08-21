@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 
-import { SqliteAdapter } from '../../src/ingest/adapters/sqlite.js';
+import { JsonAdapter } from '../../src/ingest/adapters/json.js';
 import { Indexer } from '../../src/ingest/indexer.js';
 import { testDbPath } from '../setup.js';
 
@@ -14,11 +14,11 @@ vi.mock('../../src/ingest/embeddings.js', () => ({
 }));
 
 describe('MCP Server', () => {
-  let adapter: SqliteAdapter;
+  let adapter: JsonAdapter;
   let indexer: Indexer;
 
   beforeEach(async () => {
-    adapter = new SqliteAdapter({ path: testDbPath, embeddingDim: 1536 });
+    adapter = new JsonAdapter({ path: testDbPath, embeddingDim: 1536 });
     await adapter.init();
 
     indexer = new Indexer(adapter);
@@ -64,9 +64,9 @@ describe('MCP Server', () => {
     it('should retrieve chunk by ID', async () => {
       const { resourceHandler } = await import('./mcp-test-helpers.js');
 
-      // @ts-expect-error - accessing private property for testing
-      const chunkRow = adapter.db.prepare('SELECT id FROM chunks LIMIT 1').get();
-      const result = await resourceHandler(`docchunk://${chunkRow.id}`);
+      const chunks = await adapter.findChunks();
+      const chunkRow = chunks[0];
+      const result = await resourceHandler(`docchunk://${chunkRow!.id}`);
 
       expect(result.contents).toBeDefined();
       expect(result.contents).toHaveLength(1);
@@ -86,11 +86,9 @@ describe('MCP Server', () => {
     it('should format chunk metadata correctly', async () => {
       const { resourceHandler } = await import('./mcp-test-helpers.js');
 
-      // @ts-expect-error - accessing private property for testing
-      const chunkRow = adapter.db
-        .prepare('SELECT id FROM chunks WHERE start_line IS NOT NULL LIMIT 1')
-        .get();
-      const result = await resourceHandler(`docchunk://${chunkRow.id}`);
+      const chunks = await adapter.findChunks();
+      const chunkRow = chunks.find((c) => c.start_line != null);
+      const result = await resourceHandler(`docchunk://${chunkRow!.id}`);
 
       const content = result.contents[0]!.text;
       expect(content).toContain('# Sample TypeScript File');

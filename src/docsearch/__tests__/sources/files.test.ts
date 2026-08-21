@@ -4,7 +4,7 @@ import path from 'node:path';
 
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 
-import { SqliteAdapter } from '../../src/ingest/adapters/sqlite.js';
+import { JsonAdapter } from '../../src/ingest/adapters/json.js';
 import { ingestFiles } from '../../src/ingest/sources/files.js';
 import { testDbPath } from '../setup.js';
 
@@ -17,7 +17,7 @@ vi.mock('../../src/shared/config.js', () => ({
 }));
 
 describe('File Source Ingestion', () => {
-  let adapter: SqliteAdapter;
+  let adapter: JsonAdapter;
   const fixturesDir = './test/fixtures';
   const testFiles = {
     'sample.ts': `function hello(name: string) {
@@ -48,7 +48,7 @@ module.exports = config;`,
   };
 
   beforeEach(async () => {
-    adapter = new SqliteAdapter({ path: testDbPath, embeddingDim: 1536 });
+    adapter = new JsonAdapter({ path: testDbPath, embeddingDim: 1536 });
     await adapter.init();
 
     if (existsSync(fixturesDir)) {
@@ -115,8 +115,7 @@ module.exports = config;`,
       }
 
       // For detailed metadata, we need to access the internal database
-      // @ts-expect-error - accessing private property for testing
-      const tsDoc = adapter.db.prepare("SELECT * FROM documents WHERE uri LIKE '%sample.ts'").get();
+      const tsDoc = (await adapter.findDocuments({ uriContains: 'sample.ts' }))[0];
       expect(tsDoc).toBeTruthy();
       expect(tsDoc.source).toBe('file');
       expect(tsDoc.title).toBe('sample.ts');
@@ -141,22 +140,16 @@ module.exports = config;`,
       }
 
       // Check for chunks containing 'hello'
-      // @ts-expect-error - accessing private property for testing
-      const chunkWithContent = adapter.db
-        .prepare("SELECT * FROM chunks WHERE content LIKE '%hello%'")
-        .get();
+      const chunkWithContent = (await adapter.findChunks({ contentContains: 'hello' }))[0];
       expect(chunkWithContent).toBeTruthy();
     });
 
     it('should handle different file types appropriately', async () => {
       await ingestFiles(adapter);
 
-      // @ts-expect-error - accessing private property for testing
-      const tsDoc = adapter.db.prepare("SELECT * FROM documents WHERE uri LIKE '%sample.ts'").get();
-      // @ts-expect-error - accessing private property for testing
-      const mdDoc = adapter.db.prepare("SELECT * FROM documents WHERE uri LIKE '%README.md'").get();
-      // @ts-expect-error - accessing private property for testing
-      const pyDoc = adapter.db.prepare("SELECT * FROM documents WHERE uri LIKE '%script.py'").get();
+      const tsDoc = (await adapter.findDocuments({ uriContains: 'sample.ts' }))[0];
+      const mdDoc = (await adapter.findDocuments({ uriContains: 'README.md' }))[0];
+      const pyDoc = (await adapter.findDocuments({ uriContains: 'script.py' }))[0];
 
       expect(tsDoc.lang).toBe('ts');
       expect(mdDoc.lang).toBe('md');
@@ -166,10 +159,8 @@ module.exports = config;`,
     it('should use code chunking for code files', async () => {
       await ingestFiles(adapter);
 
-      // @ts-expect-error - accessing private property for testing
-      const tsDoc = adapter.db.prepare("SELECT * FROM documents WHERE uri LIKE '%sample.ts'").get();
-      // @ts-expect-error - accessing private property for testing
-      const chunks = adapter.db.prepare('SELECT * FROM chunks WHERE document_id = ?').all(tsDoc.id);
+      const tsDoc = (await adapter.findDocuments({ uriContains: 'sample.ts' }))[0];
+      const chunks = await adapter.findChunks({ documentId: tsDoc.id });
 
       expect(chunks.length).toBeGreaterThan(0);
       chunks.forEach((chunk) => {
@@ -181,10 +172,8 @@ module.exports = config;`,
     it('should use document chunking for markdown files', async () => {
       await ingestFiles(adapter);
 
-      // @ts-expect-error - accessing private property for testing
-      const mdDoc = adapter.db.prepare("SELECT * FROM documents WHERE uri LIKE '%README.md'").get();
-      // @ts-expect-error - accessing private property for testing
-      const chunks = adapter.db.prepare('SELECT * FROM chunks WHERE document_id = ?').all(mdDoc.id);
+      const mdDoc = (await adapter.findDocuments({ uriContains: 'README.md' }))[0];
+      const chunks = await adapter.findChunks({ documentId: mdDoc.id });
 
       expect(chunks.length).toBeGreaterThan(0);
     });
@@ -192,13 +181,11 @@ module.exports = config;`,
     it('should not re-chunk unchanged files', async () => {
       await ingestFiles(adapter);
 
-      // @ts-expect-error - accessing private property for testing
-      const initialChunks = adapter.db.prepare('SELECT COUNT(*) as count FROM chunks').get();
+      const initialChunks = { count: (await adapter.getIndexStats()).chunks };
 
       await ingestFiles(adapter);
 
-      // @ts-expect-error - accessing private property for testing
-      const finalChunks = adapter.db.prepare('SELECT COUNT(*) as count FROM chunks').get();
+      const finalChunks = { count: (await adapter.getIndexStats()).chunks };
       expect(finalChunks.count).toBe(initialChunks.count);
     });
 
@@ -215,16 +202,14 @@ module.exports = config;`,
 
       await expect(ingestFiles(adapter)).resolves.not.toThrow();
 
-      // @ts-expect-error - accessing private property for testing
-      const documents = adapter.db.prepare('SELECT * FROM documents').all();
+      const documents = await adapter.findDocuments();
       expect(documents.some((d) => d.uri.includes('invalid.ts'))).toBe(false);
     });
 
     it('should generate proper file URIs', async () => {
       await ingestFiles(adapter);
 
-      // @ts-expect-error - accessing private property for testing
-      const documents = adapter.db.prepare('SELECT * FROM documents').all();
+      const documents = await adapter.findDocuments();
       documents.forEach((doc) => {
         expect(doc.uri).toMatch(/^file:\/\/.*/);
       });
@@ -233,20 +218,14 @@ module.exports = config;`,
     it('should set relative paths correctly', async () => {
       await ingestFiles(adapter);
 
-      // @ts-expect-error - accessing private property for testing
-      const nestedDoc = adapter.db
-        .prepare("SELECT * FROM documents WHERE uri LIKE '%deep.js'")
-        .get();
-      expect(nestedDoc.path).toContain('nested/deep.js');
+      const nestedDoc = (await adapter.findDocuments({ uriContains: 'deep.js' }))[0];
+      expect(nestedDoc.path.replace(/\\/g, '/')).toContain('nested/deep.js');
     });
 
     it('should handle nested directories', async () => {
       await ingestFiles(adapter);
 
-      // @ts-expect-error - accessing private property for testing
-      const nestedDoc = adapter.db
-        .prepare("SELECT * FROM documents WHERE uri LIKE '%deep.js'")
-        .get();
+      const nestedDoc = (await adapter.findDocuments({ uriContains: 'deep.js' }))[0];
       expect(nestedDoc).toBeTruthy();
       expect(nestedDoc.title).toBe('deep.js');
     });
@@ -254,12 +233,8 @@ module.exports = config;`,
     it('should detect file changes and re-chunk', async () => {
       await ingestFiles(adapter);
 
-      // @ts-expect-error - accessing private property for testing
-      const _originalChunks = adapter.db
-        .prepare(
-          'SELECT * FROM chunks JOIN documents ON chunks.document_id = documents.id WHERE documents.uri LIKE ?',
-        )
-        .all('%sample.ts%');
+      const _originalChunks = await adapter.findChunks();
+      const sampleChunks = _originalChunks.filter((c) => (c.path ?? '').includes('sample.ts'));
 
       const modifiedContent = `${testFiles['sample.ts']}\n\n// Modified content`;
       writeFileSync(path.join(fixturesDir, 'sample.ts'), modifiedContent);
@@ -268,12 +243,9 @@ module.exports = config;`,
 
       await ingestFiles(adapter);
 
-      // @ts-expect-error - accessing private property for testing
-      const newChunks = adapter.db
-        .prepare(
-          'SELECT * FROM chunks JOIN documents ON chunks.document_id = documents.id WHERE documents.uri LIKE ?',
-        )
-        .all('%sample.ts%');
+      const newChunks = (await adapter.findChunks()).filter((c) =>
+        (c.path ?? '').includes('sample.ts'),
+      );
 
       expect(newChunks.some((c) => c.content.includes('Modified content'))).toBe(true);
     });
@@ -283,20 +255,16 @@ module.exports = config;`,
     it('should identify code files correctly', async () => {
       await ingestFiles(adapter);
 
-      // @ts-expect-error - accessing private property for testing
-      const codeFiles = adapter.db
-        .prepare("SELECT * FROM documents WHERE lang IN ('ts', 'js', 'py')")
-        .all();
+      const allDocs = await adapter.findDocuments();
+      const codeFiles = allDocs.filter((d) => ['ts', 'js', 'py'].includes(d.lang ?? ''));
       expect(codeFiles.length).toBeGreaterThan(0);
     });
 
     it('should identify document files correctly', async () => {
       await ingestFiles(adapter);
 
-      // @ts-expect-error - accessing private property for testing
-      const docFiles = adapter.db
-        .prepare("SELECT * FROM documents WHERE lang IN ('md', 'txt')")
-        .all();
+      const allDocs = await adapter.findDocuments();
+      const docFiles = allDocs.filter((d) => ['md', 'txt'].includes(d.lang ?? ''));
       expect(docFiles.length).toBeGreaterThan(0);
     });
 
@@ -306,10 +274,7 @@ module.exports = config;`,
 
       await ingestFiles(adapter);
 
-      // @ts-expect-error - accessing private property for testing
-      const txtFile = adapter.db
-        .prepare("SELECT * FROM documents WHERE uri LIKE '%config.txt'")
-        .get();
+      const txtFile = (await adapter.findDocuments({ uriContains: 'config.txt' }))[0];
       expect(txtFile).toBeTruthy();
       expect(txtFile.lang).toBe('txt');
 
@@ -317,10 +282,7 @@ module.exports = config;`,
       writeFileSync(path.join(fixturesDir, 'unknown.xyz'), 'unknown file type content');
       await ingestFiles(adapter);
 
-      // @ts-expect-error - accessing private property for testing
-      const unknownFile = adapter.db
-        .prepare("SELECT * FROM documents WHERE uri LIKE '%unknown.xyz'")
-        .get();
+      const unknownFile = (await adapter.findDocuments({ uriContains: 'unknown.xyz' }))[0];
       expect(unknownFile).toBeFalsy(); // Should not be ingested as it doesn't match the glob
     });
   });
@@ -350,8 +312,7 @@ module.exports = config;`,
       // Check assertions before restoring mocks
       expect(consoleSpy).toHaveBeenCalled();
 
-      // @ts-expect-error - accessing private property for testing
-      const goodDoc = adapter.db.prepare("SELECT * FROM documents WHERE uri LIKE '%good.ts'").get();
+      const goodDoc = (await adapter.findDocuments({ uriContains: 'good.ts' }))[0];
       expect(goodDoc).toBeTruthy();
 
       // Cleanup

@@ -1,9 +1,6 @@
-import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import Database from "better-sqlite3";
-import * as sqliteVec from "sqlite-vec";
 
 export type DistanceMetric = "Cosine";
 
@@ -43,17 +40,27 @@ export function resolveDataDir(override?: string): string {
   return path.resolve(dir);
 }
 
+interface LoadedCollection {
+  name: string;
+  meta: CollectionMeta;
+  points: Map<string, PointRecord>;
+  dirty: boolean;
+}
+
 /**
- * SQLite-based vector store using sqlite-vec extension.
- * Each collection is stored as a separate .db file.
+ * File-backed vector store using JSONL (no database binaries).
+ * Each collection is a directory with meta.json + points.jsonl.
  */
 export class Store {
-  private dbs: Map<string, Database.Database> = new Map();
+  private collections: Map<string, LoadedCollection> = new Map();
+  private writeLocks: Map<string, Promise<void>> = new Map();
 
   static async create(options: StoreOptions = {}): Promise<Store> {
     const baseDir = resolveDataDir(options.dataDir);
     await fs.mkdir(baseDir, { recursive: true });
-    return new Store(baseDir);
+    const store = new Store(baseDir);
+    await store.warnLeftoverSqliteFiles();
+    return store;
   }
 
   private constructor(private readonly baseDir: string) {}
@@ -62,84 +69,155 @@ export class Store {
     return this.baseDir;
   }
 
-  private dbPath(name: string): string {
-    return path.join(this.baseDir, `${name}.db`);
+  private collectionDir(name: string): string {
+    return path.join(this.baseDir, name);
   }
 
-  private getDb(name: string): Database.Database | null {
-    let db = this.dbs.get(name);
-    if (db) {
-      return db;
+  private metaPath(name: string): string {
+    return path.join(this.collectionDir(name), "meta.json");
+  }
+
+  private pointsPath(name: string): string {
+    return path.join(this.collectionDir(name), "points.jsonl");
+  }
+
+  private async warnLeftoverSqliteFiles(): Promise<void> {
+    const entries = await fs
+      .readdir(this.baseDir, { withFileTypes: true })
+      .catch(() => []);
+    for (const entry of entries) {
+      if (entry.isFile() && entry.name.endsWith(".db")) {
+        console.error(
+          `[fake-qdrant] Ignoring leftover SQLite file "${entry.name}". ` +
+            "JSONL is the native format; re-upsert points (SQLite cannot be opened on this workstation)."
+        );
+      }
+    }
+  }
+
+  private async withWriteLock(name: string, fn: () => Promise<void>): Promise<void> {
+    const previous = this.writeLocks.get(name) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.writeLocks.set(
+      name,
+      previous.then(() => gate).catch(() => gate)
+    );
+    await previous.catch(() => undefined);
+    try {
+      await fn();
+    } finally {
+      release();
+    }
+  }
+
+  private async loadCollection(name: string): Promise<LoadedCollection | null> {
+    const cached = this.collections.get(name);
+    if (cached) {
+      return cached;
     }
 
-    const dbFile = this.dbPath(name);
-    if (!existsSync(dbFile)) {
+    const metaFile = this.metaPath(name);
+    let metaRaw: string;
+    try {
+      metaRaw = await fs.readFile(metaFile, "utf8");
+    } catch {
       return null;
     }
 
-    db = new Database(dbFile);
-    db.pragma("journal_mode = WAL");
-    sqliteVec.load(db);
-    this.dbs.set(name, db);
-    return db;
-  }
-
-  /**
-   * Create a new database for a collection.
-   */
-  private createDb(name: string, dimension: number): Database.Database {
-    // Close existing if any
-    const existing = this.dbs.get(name);
-    if (existing) {
-      existing.close();
-      this.dbs.delete(name);
+    let parsed: { size?: unknown; distance?: unknown };
+    try {
+      parsed = JSON.parse(metaRaw) as { size?: unknown; distance?: unknown };
+    } catch {
+      return null;
     }
 
-    const dbFile = this.dbPath(name);
-    const db = new Database(dbFile);
-    db.pragma("journal_mode = WAL");
-    sqliteVec.load(db);
+    const size = Number(parsed.size);
+    if (!Number.isInteger(size) || size <= 0) {
+      return null;
+    }
 
-    // Create metadata table
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS meta (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL
-      )
-    `);
-
-    // Store collection metadata
-    const insertMeta = db.prepare(
-      "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)"
+    const distance = normalizeDistance(
+      typeof parsed.distance === "string" ? parsed.distance : undefined
     );
-    insertMeta.run("size", String(dimension));
-    insertMeta.run("distance", "Cosine");
 
-    // Create vectors virtual table with cosine distance metric
-    db.exec(`
-      CREATE VIRTUAL TABLE IF NOT EXISTS vectors USING vec0(
-        point_id TEXT PRIMARY KEY,
-        embedding FLOAT[${dimension}] DISTANCE_METRIC=cosine
-      )
-    `);
+    const points = new Map<string, PointRecord>();
+    try {
+      const content = await fs.readFile(this.pointsPath(name), "utf8");
+      for (const line of content.split("\n")) {
+        if (!line.trim()) {
+          continue;
+        }
+        try {
+          const record = JSON.parse(line) as PointRecord;
+          if (!isValidPointId(record.id) || !Array.isArray(record.vector)) {
+            continue;
+          }
+          points.set(String(record.id), record);
+        } catch {
+          // Skip malformed lines
+        }
+      }
+    } catch {
+      // Missing points.jsonl is an empty collection
+    }
 
-    // Create payloads table
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS payloads (
-        point_id TEXT PRIMARY KEY,
-        payload TEXT
-      )
-    `);
+    const loaded: LoadedCollection = {
+      name,
+      meta: { size, distance },
+      points,
+      dirty: false,
+    };
+    this.collections.set(name, loaded);
+    return loaded;
+  }
 
-    this.dbs.set(name, db);
-    return db;
+  private async writeMeta(name: string, meta: CollectionMeta): Promise<void> {
+    await fs.mkdir(this.collectionDir(name), { recursive: true });
+    const tmp = `${this.metaPath(name)}.tmp`;
+    await fs.writeFile(tmp, `${JSON.stringify(meta, null, 2)}\n`, "utf8");
+    await fs.rename(tmp, this.metaPath(name)).catch(async () => {
+      await fs.rm(this.metaPath(name), { force: true }).catch(() => undefined);
+      await fs.rename(tmp, this.metaPath(name));
+    });
+  }
+
+  private async rewritePoints(loaded: LoadedCollection): Promise<void> {
+    await fs.mkdir(this.collectionDir(loaded.name), { recursive: true });
+    const dest = this.pointsPath(loaded.name);
+    const tmp = `${dest}.tmp`;
+    const lines: string[] = [];
+    for (const point of loaded.points.values()) {
+      lines.push(JSON.stringify(point));
+    }
+    const body = lines.length > 0 ? `${lines.join("\n")}\n` : "";
+    await fs.writeFile(tmp, body, "utf8");
+    await fs.rename(tmp, dest).catch(async () => {
+      await fs.rm(dest, { force: true }).catch(() => undefined);
+      await fs.rename(tmp, dest);
+    });
+    loaded.dirty = false;
+  }
+
+  private async appendPoints(
+    name: string,
+    points: PointRecord[]
+  ): Promise<void> {
+    await fs.mkdir(this.collectionDir(name), { recursive: true });
+    const payload = points.map((point) => JSON.stringify(point)).join("\n");
+    if (!payload) {
+      return;
+    }
+    await fs.appendFile(this.pointsPath(name), `${payload}\n`, "utf8");
   }
 
   async listCollections(): Promise<CollectionInfo[]> {
     const entries = await fs
       .readdir(this.baseDir, { withFileTypes: true })
       .catch((error) => {
-        if ("code" in (error as Error) && (error as any).code === "ENOENT") {
+        if ("code" in (error as Error) && (error as { code?: string }).code === "ENOENT") {
           return [];
         }
         throw error;
@@ -147,11 +225,10 @@ export class Store {
 
     const result: CollectionInfo[] = [];
     for (const entry of entries) {
-      if (!entry.isFile() || !entry.name.endsWith(".db")) {
+      if (!entry.isDirectory()) {
         continue;
       }
-      const name = entry.name.slice(0, -3); // Remove .db extension
-      const info = await this.getCollection(name);
+      const info = await this.getCollection(entry.name);
       if (info) {
         result.push(info);
       }
@@ -160,33 +237,14 @@ export class Store {
   }
 
   async getCollection(name: string): Promise<CollectionInfo | null> {
-    const db = this.getDb(name);
-    if (!db) {
+    const loaded = await this.loadCollection(name);
+    if (!loaded) {
       return null;
     }
-
-    try {
-      const sizeRow = db
-        .prepare("SELECT value FROM meta WHERE key = 'size'")
-        .get() as { value: string } | undefined;
-      const distanceRow = db
-        .prepare("SELECT value FROM meta WHERE key = 'distance'")
-        .get() as { value: string } | undefined;
-
-      if (!sizeRow) {
-        return null;
-      }
-
-      return {
-        name,
-        vectors: {
-          size: parseInt(sizeRow.value, 10),
-          distance: (distanceRow?.value as DistanceMetric) || "Cosine",
-        },
-      };
-    } catch {
-      return null;
-    }
+    return {
+      name,
+      vectors: { ...loaded.meta },
+    };
   }
 
   async createCollection(
@@ -199,117 +257,79 @@ export class Store {
     }
 
     const distance = normalizeDistance(meta.distance);
-
-    // Delete existing collection if any
     await this.deleteCollection(name);
 
-    // Create new database with vec0 table
-    this.createDb(name, size);
+    const loaded: LoadedCollection = {
+      name,
+      meta: { size, distance },
+      points: new Map(),
+      dirty: false,
+    };
+    this.collections.set(name, loaded);
+    await this.writeMeta(name, loaded.meta);
+    await fs.writeFile(this.pointsPath(name), "", "utf8");
 
     return { name, vectors: { size, distance } };
   }
 
   async deleteCollection(name: string): Promise<void> {
-    // Close database connection if open
-    const db = this.dbs.get(name);
-    if (db) {
-      db.close();
-      this.dbs.delete(name);
-    }
-
-    // Delete database file
-    const dbFile = this.dbPath(name);
-    await fs.rm(dbFile, { force: true }).catch(() => {});
-    // Also remove WAL and SHM files if they exist
-    await fs.rm(dbFile + "-wal", { force: true }).catch(() => {});
-    await fs.rm(dbFile + "-shm", { force: true }).catch(() => {});
+    this.collections.delete(name);
+    await fs.rm(this.collectionDir(name), { recursive: true, force: true }).catch(() => undefined);
+    await fs.rm(path.join(this.baseDir, `${name}.db`), { force: true }).catch(() => undefined);
+    await fs.rm(path.join(this.baseDir, `${name}.db-wal`), { force: true }).catch(() => undefined);
+    await fs.rm(path.join(this.baseDir, `${name}.db-shm`), { force: true }).catch(() => undefined);
   }
 
   /**
    * Delete points from a collection by IDs or by filter.
-   * @param name Collection name
-   * @param pointIds Optional array of point IDs to delete
-   * @param filter Optional filter function to match points by payload
-   * @returns Number of points deleted (0 if collection doesn't exist)
    */
   async deletePoints(
     name: string,
     pointIds?: (string | number)[],
     filter?: (payload: unknown) => boolean
   ): Promise<number> {
-    const db = this.getDb(name);
-    if (!db) {
+    const loaded = await this.loadCollection(name);
+    if (!loaded) {
       return 0;
     }
 
-    let deletedCount = 0;
-
-    // Delete by IDs
+    const toDelete = new Set<string>();
     if (pointIds && pointIds.length > 0) {
-      const deleteVector = db.prepare("DELETE FROM vectors WHERE point_id = ?");
-      const deletePayload = db.prepare(
-        "DELETE FROM payloads WHERE point_id = ?"
-      );
-
-      const deleteById = db.transaction((ids: (string | number)[]) => {
-        for (const id of ids) {
-          const idStr = String(id);
-          const result = deleteVector.run(idStr);
-          deletePayload.run(idStr);
-          deletedCount += result.changes;
+      for (const id of pointIds) {
+        toDelete.add(String(id));
+      }
+    }
+    if (filter) {
+      for (const [key, point] of loaded.points) {
+        if (filter(point.payload ?? null)) {
+          toDelete.add(key);
         }
-      });
-
-      deleteById(pointIds);
+      }
     }
 
-    // Delete by filter (requires scanning payloads)
-    if (filter) {
-      const allPayloads = db
-        .prepare("SELECT point_id, payload FROM payloads")
-        .all() as Array<{ point_id: string; payload: string | null }>;
-
-      const idsToDelete: string[] = [];
-      for (const row of allPayloads) {
-        const payload = row.payload ? JSON.parse(row.payload) : null;
-        if (filter(payload)) {
-          idsToDelete.push(row.point_id);
-        }
+    let deletedCount = 0;
+    for (const key of toDelete) {
+      if (loaded.points.delete(key)) {
+        deletedCount += 1;
       }
+    }
 
-      if (idsToDelete.length > 0) {
-        const deleteVector = db.prepare(
-          "DELETE FROM vectors WHERE point_id = ?"
-        );
-        const deletePayload = db.prepare(
-          "DELETE FROM payloads WHERE point_id = ?"
-        );
-
-        const deleteByFilter = db.transaction((ids: string[]) => {
-          for (const id of ids) {
-            const result = deleteVector.run(id);
-            deletePayload.run(id);
-            deletedCount += result.changes;
-          }
-        });
-
-        deleteByFilter(idsToDelete);
-      }
+    if (deletedCount > 0) {
+      await this.withWriteLock(name, async () => {
+        await this.rewritePoints(loaded);
+      });
     }
 
     return deletedCount;
   }
 
   async upsertPoints(name: string, points: PointRecord[]): Promise<void> {
-    const collection = await this.getCollection(name);
-    if (!collection) {
+    const loaded = await this.loadCollection(name);
+    if (!loaded) {
       throw new Error(`Collection not found: ${name}`);
     }
 
-    const db = this.getDb(name)!;
-    const dimension = collection.vectors.size;
-
-    // Validate points
+    const dimension = loaded.meta.size;
     for (const point of points) {
       if (!isValidPointId(point.id)) {
         throw new Error("Point id must be a string or number");
@@ -325,46 +345,26 @@ export class Store {
       }
     }
 
-    // Prepare statements for upsert
-    // For vec0 tables, we need to delete then insert (no UPDATE support)
-    const deleteVector = db.prepare("DELETE FROM vectors WHERE point_id = ?");
-    const insertVector = db.prepare(
-      "INSERT INTO vectors (point_id, embedding) VALUES (?, ?)"
-    );
-    const upsertPayload = db.prepare(
-      "INSERT OR REPLACE INTO payloads (point_id, payload) VALUES (?, ?)"
-    );
-
-    // Use a transaction for atomic upsert
-    const upsert = db.transaction((pts: PointRecord[]) => {
-      for (const point of pts) {
-        const idStr = String(point.id);
-
-        // Delete existing vector if present (vec0 doesn't support UPDATE)
-        deleteVector.run(idStr);
-
-        // Insert vector as JSON string
-        insertVector.run(idStr, JSON.stringify(point.vector));
-
-        // Upsert payload
-        const payloadJson =
-          point.payload !== undefined ? JSON.stringify(point.payload) : null;
-        upsertPayload.run(idStr, payloadJson);
+    await this.withWriteLock(name, async () => {
+      for (const point of points) {
+        loaded.points.set(String(point.id), {
+          id: point.id,
+          vector: point.vector,
+          payload: point.payload,
+        });
       }
+      loaded.dirty = true;
+      await this.appendPoints(name, points);
     });
-
-    upsert(points);
   }
 
   async query(name: string, queryVector: number[], options: QueryOptions = {}) {
-    const collection = await this.getCollection(name);
-    if (!collection) {
+    const loaded = await this.loadCollection(name);
+    if (!loaded) {
       throw new Error(`Collection not found: ${name}`);
     }
 
-    const db = this.getDb(name)!;
-    const dimension = collection.vectors.size;
-
+    const dimension = loaded.meta.size;
     if (
       !Array.isArray(queryVector) ||
       queryVector.length !== dimension ||
@@ -378,105 +378,77 @@ export class Store {
     const limit = Math.max(1, options.limit ?? 20);
     const scoreThreshold = options.scoreThreshold ?? 0;
 
-    // Query using vec0 MATCH syntax
-    // sqlite-vec returns cosine distance (0 = identical, 2 = opposite)
-    // We convert to similarity: similarity = 1 - distance
-    const stmt = db.prepare(`
-      SELECT 
-        v.point_id,
-        v.distance,
-        p.payload
-      FROM vectors v
-      LEFT JOIN payloads p ON v.point_id = p.point_id
-      WHERE v.embedding MATCH ?
-        AND k = ?
-      ORDER BY v.distance ASC
-    `);
-
-    // Request more results to filter by threshold
-    const searchLimit = Math.max(limit * 2, 50);
-    const rows = stmt.all(JSON.stringify(queryVector), searchLimit) as Array<{
-      point_id: string;
-      distance: number;
-      payload: string | null;
-    }>;
-
-    const results: Array<{
-      id: string | number;
-      score: number;
-      payload: unknown;
-    }> = [];
-
-    for (const row of rows) {
-      // Convert distance to similarity score
-      const score = 1 - row.distance;
-
+    const scored: Array<{ id: string | number; score: number; payload: unknown }> =
+      [];
+    for (const point of loaded.points.values()) {
+      const score = cosineSimilarity(queryVector, point.vector);
       if (score >= scoreThreshold) {
-        // Try to parse ID back to number if it was originally a number
-        let id: string | number = row.point_id;
-        const numId = Number(row.point_id);
-        if (!isNaN(numId) && String(numId) === row.point_id) {
-          id = numId;
-        }
-
-        results.push({
-          id,
+        scored.push({
+          id: point.id,
           score,
-          payload: row.payload ? JSON.parse(row.payload) : null,
+          payload: point.payload ?? null,
         });
-
-        if (results.length >= limit) {
-          break;
-        }
       }
     }
 
-    return results;
+    scored.sort((a, b) => b.score - a.score);
+    return scored.slice(0, limit);
   }
 
   /**
-   * Compact the collection by running SQLite VACUUM.
-   * Returns the number of unique points in the collection.
+   * Compact the collection by rewriting unique points (latest id wins).
    */
   async compactCollection(name: string): Promise<number> {
-    const collection = await this.getCollection(name);
-    if (!collection) {
+    const loaded = await this.loadCollection(name);
+    if (!loaded) {
       throw new Error(`Collection not found: ${name}`);
     }
 
-    const db = this.getDb(name)!;
-
-    // Run VACUUM to reclaim space and optimize database
-    db.exec("VACUUM");
-
-    // Count points
-    const countRow = db
-      .prepare("SELECT COUNT(*) as count FROM vectors")
-      .get() as { count: number };
-
-    return countRow.count;
+    await this.withWriteLock(name, async () => {
+      await this.rewritePoints(loaded);
+    });
+    return loaded.points.size;
   }
 
   /**
-   * Persist all indexes to disk.
-   * With SQLite, this performs a WAL checkpoint to ensure durability.
+   * Flush dirty collections to a compact JSONL snapshot.
    */
   async persistAllIndexes(): Promise<void> {
-    for (const db of this.dbs.values()) {
-      // Force WAL checkpoint to ensure all changes are written to main database file
-      db.pragma("wal_checkpoint(TRUNCATE)");
+    for (const loaded of this.collections.values()) {
+      if (!loaded.dirty) {
+        continue;
+      }
+      await this.withWriteLock(loaded.name, async () => {
+        await this.rewritePoints(loaded);
+      });
     }
   }
 
   /**
-   * Close all database connections. Call this before shutdown.
+   * Drop in-memory collections. Call this before shutdown.
    */
   close(): void {
-    for (const db of this.dbs.values()) {
-      db.close();
-    }
-    this.dbs.clear();
+    this.collections.clear();
   }
+}
+
+function cosineSimilarity(a: number[], b: number[]): number {
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  const len = Math.min(a.length, b.length);
+  for (let i = 0; i < len; i += 1) {
+    const av = a[i] ?? 0;
+    const bv = b[i] ?? 0;
+    dot += av * bv;
+    normA += av * av;
+    normB += bv * bv;
+  }
+  const denom = Math.sqrt(normA) * Math.sqrt(normB);
+  if (denom === 0) {
+    return 0;
+  }
+  return dot / denom;
 }
 
 function normalizeDistance(value?: string): DistanceMetric {

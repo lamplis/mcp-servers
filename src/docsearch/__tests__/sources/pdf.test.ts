@@ -3,33 +3,28 @@ import path from 'node:path';
 
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 
-import { SqliteAdapter } from '../../src/ingest/adapters/sqlite.js';
+import { JsonAdapter } from '../../src/ingest/adapters/json.js';
 import { chunkPdf } from '../../src/ingest/chunker.js';
 import { ingestFiles } from '../../src/ingest/sources/files.js';
 import { testDbPath } from '../setup.js';
 
 // Mock pdf-parse to avoid needing actual PDF files
-vi.mock('pdf-parse', () => ({
-  PDFParse: vi.fn().mockImplementation(function (options) {
-    const text = options.data?.toString() || '';
-
-    const mockTextResult = {
-      text: '',
-      pages: [] as any[],
-    };
-
-    const mockInfoResult = {
-      total: 1,
-      info: {},
-      metadata: null,
-      outline: null,
-      permissions: null,
-      pageLabels: null,
-      pages: [] as any[],
-    };
-
-    if (text.includes('mock-pdf-content')) {
-      mockTextResult.text = `This is a mock PDF document.
+vi.mock('pdf-parse', () => {
+  class PDFParse {
+    private readonly text: string;
+    constructor(options: { data?: Buffer | string }) {
+      this.text = options.data?.toString() || '';
+    }
+    async getText() {
+      if (this.text.includes('error-pdf')) {
+        throw new Error('PDF parsing failed');
+      }
+      if (this.text.includes('empty-pdf')) {
+        return { text: '', pages: [] };
+      }
+      if (this.text.includes('mock-pdf-content')) {
+        return {
+          text: `This is a mock PDF document.
 
 It contains multiple paragraphs with various content.
 Some lines might have    excessive   whitespace   or formatting.
@@ -41,30 +36,31 @@ There could be multiple line breaks between sections.
 Page breaks and other artifacts are common in PDF extraction.
 This text represents what would be extracted from a PDF file.
 
-The content should be properly chunked and indexed for search.`;
-      mockInfoResult.total = 2;
-      mockInfoResult.info = {
-        Title: 'Mock PDF Document',
-        Author: 'Test Author',
-        CreationDate: new Date().toISOString(),
-      };
-    } else if (text.includes('empty-pdf')) {
-      mockTextResult.text = '';
-      mockInfoResult.total = 1;
-    } else if (text.includes('error-pdf')) {
-      throw new Error('PDF parsing failed');
-    } else {
-      mockTextResult.text = 'Default PDF content for testing.';
-      mockInfoResult.total = 1;
+The content should be properly chunked and indexed for search.`,
+          pages: [],
+        };
+      }
+      return { text: 'Default PDF content for testing.', pages: [] };
     }
-
-    return {
-      getText: vi.fn().mockResolvedValue(mockTextResult),
-      getInfo: vi.fn().mockResolvedValue(mockInfoResult),
-      destroy: vi.fn().mockResolvedValue(undefined),
-    };
-  }),
-}));
+    async getInfo() {
+      if (this.text.includes('mock-pdf-content')) {
+        return {
+          total: 2,
+          info: {
+            Title: 'Mock PDF Document',
+            Author: 'Test Author',
+            CreationDate: new Date().toISOString(),
+          },
+        };
+      }
+      return { total: 1, info: {} };
+    }
+    async destroy() {
+      return undefined;
+    }
+  }
+  return { PDFParse };
+});
 
 vi.mock('../../src/shared/config.js', () => ({
   CONFIG: {
@@ -75,7 +71,7 @@ vi.mock('../../src/shared/config.js', () => ({
 }));
 
 describe('PDF Ingestion', () => {
-  let adapter: SqliteAdapter;
+  let adapter: JsonAdapter;
   const fixturesDir = './test/fixtures';
   const testFiles = {
     'document.pdf': 'mock-pdf-content',
@@ -84,7 +80,7 @@ describe('PDF Ingestion', () => {
   };
 
   beforeEach(async () => {
-    adapter = new SqliteAdapter({ path: testDbPath, embeddingDim: 1536 });
+    adapter = new JsonAdapter({ path: testDbPath, embeddingDim: 1536 });
     await adapter.init();
 
     if (existsSync(fixturesDir)) {
@@ -124,10 +120,7 @@ describe('PDF Ingestion', () => {
     it('should set correct metadata for PDF files', async () => {
       await ingestFiles(adapter);
 
-      // @ts-expect-error - accessing private property for testing
-      const pdfDoc = adapter.db
-        .prepare("SELECT * FROM documents WHERE uri LIKE '%document.pdf'")
-        .get();
+      const pdfDoc = (await adapter.findDocuments({ uriContains: 'document.pdf' }))[0];
       expect(pdfDoc).toBeTruthy();
       expect(pdfDoc.source).toBe('file');
       expect(pdfDoc.title).toBe('document'); // Should strip .pdf extension
@@ -140,10 +133,7 @@ describe('PDF Ingestion', () => {
     it('should store PDF metadata in extraJson', async () => {
       await ingestFiles(adapter);
 
-      // @ts-expect-error - accessing private property for testing
-      const pdfDoc = adapter.db
-        .prepare("SELECT * FROM documents WHERE uri LIKE '%document.pdf'")
-        .get();
+      const pdfDoc = (await adapter.findDocuments({ uriContains: 'document.pdf' }))[0];
       expect(pdfDoc).toBeTruthy();
       expect(pdfDoc.extra_json).toBeTruthy();
 
@@ -166,10 +156,7 @@ describe('PDF Ingestion', () => {
       }
 
       // Check that chunks contain expected content
-      // @ts-expect-error - accessing private property for testing
-      const chunkWithContent = adapter.db
-        .prepare("SELECT * FROM chunks WHERE content LIKE '%mock PDF document%'")
-        .get();
+      const chunkWithContent = (await adapter.findChunks({ contentContains: 'mock PDF document' }))[0];
       expect(chunkWithContent).toBeTruthy();
     });
 
@@ -205,14 +192,8 @@ describe('PDF Ingestion', () => {
     it('should use PDF-specific chunking', async () => {
       await ingestFiles(adapter);
 
-      // @ts-expect-error - accessing private property for testing
-      const pdfDoc = adapter.db
-        .prepare("SELECT * FROM documents WHERE uri LIKE '%document.pdf'")
-        .get();
-      // @ts-expect-error - accessing private property for testing
-      const chunks = adapter.db
-        .prepare('SELECT * FROM chunks WHERE document_id = ?')
-        .all(pdfDoc.id);
+      const pdfDoc = (await adapter.findDocuments({ uriContains: 'document.pdf' }))[0];
+      const chunks = await adapter.findChunks({ documentId: pdfDoc.id });
 
       expect(chunks.length).toBeGreaterThan(0);
       // PDF chunks should not have line numbers (unlike code files)

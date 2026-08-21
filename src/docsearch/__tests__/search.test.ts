@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 import { testDbPath } from './setup.js';
-import { SqliteAdapter } from '../src/ingest/adapters/sqlite.js';
+import { JsonAdapter } from '../src/ingest/adapters/json.js';
 import { Indexer } from '../src/ingest/indexer.js';
 import { performSearch } from '../src/ingest/search.js';
 
@@ -16,11 +16,11 @@ vi.mock('../src/ingest/embeddings.js', () => ({
 }));
 
 describe('Search', () => {
-  let adapter: SqliteAdapter;
+  let adapter: JsonAdapter;
   let indexer: Indexer;
 
   beforeEach(async () => {
-    adapter = new SqliteAdapter({ path: testDbPath, embeddingDim: 1536 });
+    adapter = new JsonAdapter({ path: testDbPath, embeddingDim: 1536 });
     await adapter.init();
     indexer = new Indexer(adapter);
 
@@ -248,15 +248,10 @@ describe('Search', () => {
         mode: 'keyword',
       };
 
-      // With proper escaping, this should not throw and should be treated as a literal search
       await expect(performSearch(adapter, params)).resolves.not.toThrow();
 
-      // Verify the table still exists (injection attempt failed)
-      // @ts-expect-error - accessing private property for testing
-      const tableExists = adapter.db
-        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='documents'")
-        .get();
-      expect(tableExists).toBeTruthy();
+      const docs = await adapter.findDocuments();
+      expect(docs.length).toBeGreaterThan(0);
     });
 
     it('should handle special characters in filters safely', async () => {

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 import { testDbPath } from './setup.js';
-import { SqliteAdapter } from '../src/ingest/adapters/sqlite.js';
+import { JsonAdapter } from '../src/ingest/adapters/json.js';
 import { Indexer } from '../src/ingest/indexer.js';
 import { performSearch } from '../src/ingest/search.js';
 
@@ -20,11 +20,11 @@ vi.mock('../src/ingest/embeddings.js', () => ({
 }));
 
 describe('Image Search', () => {
-  let adapter: SqliteAdapter;
+  let adapter: JsonAdapter;
   let indexer: Indexer;
 
   beforeEach(async () => {
-    adapter = new SqliteAdapter({ path: testDbPath, embeddingDim: 1536 });
+    adapter = new JsonAdapter({ path: testDbPath, embeddingDim: 1536 });
     await adapter.init();
     indexer = new Indexer(adapter);
 
@@ -243,10 +243,8 @@ describe('Image Search', () => {
 
       // All results should be images
       for (const result of results) {
-        const doc = await adapter.rawQuery('SELECT lang FROM documents WHERE id = ?', [
-          result.document_id,
-        ]);
-        expect(doc[0]?.lang).toBe('image');
+        const docs = await adapter.findDocuments({ id: result.document_id });
+        expect(docs[0]?.lang).toBe('image');
       }
 
       // Should find the architecture diagram
@@ -267,10 +265,8 @@ describe('Image Search', () => {
 
       // No results should be images
       for (const result of results) {
-        const doc = await adapter.rawQuery('SELECT lang FROM documents WHERE id = ?', [
-          result.document_id,
-        ]);
-        expect(doc[0]?.lang).not.toBe('image');
+        const docs = await adapter.findDocuments({ id: result.document_id });
+        expect(docs[0]?.lang).not.toBe('image');
       }
 
       // Should not find any image files
@@ -370,10 +366,8 @@ describe('Image Search', () => {
       // All results should be from file source and be images
       for (const result of results) {
         expect(result.source).toBe('file');
-        const doc = await adapter.rawQuery('SELECT lang FROM documents WHERE id = ?', [
-          result.document_id,
-        ]);
-        expect(doc[0]?.lang).toBe('image');
+        const docs = await adapter.findDocuments({ id: result.document_id });
+        expect(docs[0]?.lang).toBe('image');
       }
     });
 
@@ -392,10 +386,8 @@ describe('Image Search', () => {
       // All results should be from project-a repo and be images
       for (const result of results) {
         expect(result.repo).toBe('project-a');
-        const doc = await adapter.rawQuery('SELECT lang FROM documents WHERE id = ?', [
-          result.document_id,
-        ]);
-        expect(doc[0]?.lang).toBe('image');
+        const docs = await adapter.findDocuments({ id: result.document_id });
+        expect(docs[0]?.lang).toBe('image');
       }
 
       // Should find architecture.png and screenshot.png from project-a, but not flowchart.jpg from project-b
@@ -419,10 +411,8 @@ describe('Image Search', () => {
 
       for (const result of results) {
         expect(result.path).toMatch(/^docs\//);
-        const doc = await adapter.rawQuery('SELECT lang FROM documents WHERE id = ?', [
-          result.document_id,
-        ]);
-        expect(doc[0]?.lang).toBe('image');
+        const docs = await adapter.findDocuments({ id: result.document_id });
+        expect(docs[0]?.lang).toBe('image');
       }
     });
   });
@@ -453,10 +443,8 @@ describe('Image Search', () => {
       // imagesOnly should take precedence and return only images
       expect(results.length).toBeGreaterThan(0);
       for (const result of results) {
-        const doc = await adapter.rawQuery('SELECT lang FROM documents WHERE id = ?', [
-          result.document_id,
-        ]);
-        expect(doc[0]?.lang).toBe('image');
+        const docs = await adapter.findDocuments({ id: result.document_id });
+        expect(docs[0]?.lang).toBe('image');
       }
     });
 

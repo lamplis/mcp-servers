@@ -72,10 +72,10 @@ export async function ingestFiles(adapter: DatabaseAdapter) {
   const imageToTextProvider = getImageToTextProvider();
 
   // Use DOCS_DIR as the primary source
-  const docsDir = CONFIG.DOCS_DIR;
-  
-  // Ensure docs directory exists
-  await fs.mkdir(docsDir, { recursive: true });
+  const docsDir = CONFIG.DOCS_DIR ?? CONFIG.FILE_ROOTS[0];
+  if (docsDir) {
+    await fs.mkdir(docsDir, { recursive: true });
+  }
 
   // Get file roots (defaults to DOCS_DIR via config)
   const roots = CONFIG.FILE_ROOTS.length > 0 ? CONFIG.FILE_ROOTS : [docsDir];

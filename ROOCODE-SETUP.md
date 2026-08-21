@@ -1,235 +1,251 @@
-# RooCode MCP Servers Setup Guide
+# RooCode / Cursor MCP User Guide
 
-This guide explains how to integrate the MCP servers collection with [RooCode](https://roocode.com).
+This guide covers the local MCP set in this repo: JSON-only storage, `npx` + Python launchers, no Docker, no SQLite, no admin installs.
+
+Validated on this workstation (Node 22 / Node 20-compatible, Windows 11, no admin): all seven configured servers start over stdio, list tools, and answer a smoke `tools/call`. Fake Qdrant also serves `GET http://127.0.0.1:16333/healthz` during validation; production uses `:6333`. Local embeddings also serves `GET http://127.0.0.1:13100/healthz` during validation; production uses `:3100`.
 
 ## Prerequisites
 
-- **Node.js 20+** installed
-- **npm** available
-- **OpenAI API key** (for docsearch embeddings)
-- **RooCode** extension installed in VS Code
+- **Node.js 20+** and **npx**
+- **Python 3** (only for `scripts/setup_roo.py`)
+- **RooCode** and/or **Cursor** in VS Code
+- No Docker, WSL, SQLite binaries, or extra system installs
+
+Launchers allowed here: **npx** and **python** only.
 
 ## Quick Start
 
-### 1. Clone and Install
+From this repo:
 
-```bash
-git clone https://github.com/modelcontextprotocol/servers.git mcp-servers
-cd mcp-servers
+```powershell
+cd C:\DEVHOME\GITHUB\mcp-servers
 npm install
+python scripts/setup_roo.py
+python scripts/setup_roo.py --check
+node scripts/validate_mcps.mjs
 ```
 
-### 2. Configure MCP Servers
+`.roo/mcp.json` and `.cursor/mcp.json` are **generated** (absolute paths) and not committed. After clone, run `python scripts/setup_roo.py`. That also creates:
 
-Copy the template configuration to your project:
+- `data/fake-qdrant/`
+- `data/docsearch/docs/`
+- `model-cache/`
 
-```bash
-# Create .roo directory in your project
-mkdir -p <YOUR_PROJECT>\.roo
+The Cursor playbook under `.cursor/rules/` is local (`.cursor/` is gitignored). Source of truth: `docs/mcp-servers-rules.md`.
 
-# Copy the template
-copy mcp-servers\mcp-config-roocode.json <YOUR_PROJECT>\.roo\mcp.json
+Reload VS Code / RooCode / Cursor so the MCP servers start.
+
+### Copy into another project
+
+```powershell
+mkdir <YOUR_PROJECT>\.roo
+copy mcp-servers\mcp-config-template.json <YOUR_PROJECT>\.roo\mcp.json
 ```
 
-### 3. Edit the Configuration
-
-Open `<YOUR_PROJECT>\.roo\mcp.json` and replace the placeholders:
+Replace placeholders:
 
 | Placeholder | Replace With | Example |
 |-------------|--------------|---------|
-| `<MCP_SERVERS_PATH>` | Full path to mcp-servers folder | `C:\\DEVHOME\\GITHUB\\mcp-servers` |
+| `<MCP_SERVERS_PATH>` | Full path to this repo | `C:\\DEVHOME\\GITHUB\\mcp-servers` |
 | `<ALLOWED_PATH>` | Directory for filesystem access | `C:\\DEVHOME` |
-| `<YOUR_OPENAI_API_KEY>` | Your OpenAI API key | `sk-proj-...` |
-| `<YOUR_PROJECT_PATH>` | Your project's root path | `C:\\DEVHOME\\GITHUB\\MyProject` |
+| `<PROJECT_PATH>` | Your project's root path | `C:\\DEVHOME\\GITHUB\\MyProject` |
 
-**Example after replacement:**
+Copy the AI usage **playbook** (routing + recipes, not a tool catalog):
 
-```json
-{
-  "mcpServers": {
-    "central-memory": {
-      "command": "npx",
-      "args": ["tsx", "src/memory/index.ts"],
-      "cwd": "C:\\DEVHOME\\GITHUB\\mcp-servers",
-      "disabled": false
-    },
-    "central-docsearch": {
-      "command": "npx",
-      "args": ["tsx", "src/docsearch/index.ts"],
-      "cwd": "C:\\DEVHOME\\GITHUB\\mcp-servers",
-      "env": {
-        "OPENAI_API_KEY": "sk-proj-your-key-here",
-        "DOCSEARCH_DATA_DIR": "C:\\DEVHOME\\GITHUB\\MyProject\\.roo\\docsearch-data"
-      }
-    }
-  }
-}
+```powershell
+mkdir <YOUR_PROJECT>\.roo\rules
+copy mcp-servers\docs\mcp-servers-rules.md <YOUR_PROJECT>\.roo\rules\mcp-servers.md
 ```
 
-### 4. Copy the Rule File (Optional but Recommended)
+## Validate that MCP servers work
 
-Copy the AI instructions rule file to your project:
+Environment check (Node, npx, Python, writable data dirs, leftover `.db` files):
 
-```bash
-mkdir -p <YOUR_PROJECT>\.roo\rules
-copy mcp-servers\.roo\rules\mcp-servers.md <YOUR_PROJECT>\.roo\rules\
+```powershell
+python scripts/setup_roo.py --check
 ```
 
-This file teaches the AI how to use the MCP servers effectively.
+Stdio handshake + smoke tool call for every configured server:
 
-### 5. Set Up Docsearch Data (Optional)
-
-If using docsearch, create the data directories:
-
-```bash
-mkdir -p <YOUR_PROJECT>\.roo\docsearch-data\docs
+```powershell
+node scripts/validate_mcps.mjs
 ```
 
-Add URLs to index in `<YOUR_PROJECT>\.roo\docsearch-data\urls.md`:
+Or: `npm run validate:mcp`
 
-```markdown
-# Documentation URLs to index
-https://www.typescriptlang.org/docs/handbook/
-https://docs.example.com/api/
+That script starts each server with `npx tsx`, waits until it logs ready on stderr, then:
+
+1. `initialize`
+2. `tools/list`
+3. A cheap `tools/call` (`read_graph`, `list_allowed_directories`, `echo`, `fake_qdrant_list_collections`, `health`, `doc-ingest-status`)
+4. HTTP `GET /healthz` for fake-qdrant (`:16333` during the check) and local-embeddings (`:13100` during the check)
+
+### Validated servers (default Roo / Cursor set)
+
+| Config name | Entry | Smoke check |
+|-------------|-------|-------------|
+| `central-memory` | `src/memory/index.ts` | `read_graph` (9 tools) |
+| `central-filesystem` | `src/filesystem/index.ts` | `list_allowed_directories` (14 tools) |
+| `central-sequentialthinking` | `src/sequentialthinking/index.ts` | `tools/list` (`sequentialthinking`) |
+| `central-everything` | `src/everything/index.ts stdio` | `echo` (12 tools) |
+| `central-fake-qdrant` | `src/fake-qdrant/index.ts` | list collections + HTTP `/healthz` |
+| `central-local-embeddings` | `src/local-embeddings/index.ts` | `health` + HTTP `/healthz` |
+| `central-docsearch` | `src/docsearch/index.ts` | `doc-ingest-status` (3 tools) |
+
+Not in the default Roo set (need extra runtimes such as `uv`): `src/fetch`, `src/git`, `src/time`.
+
+## Storage model (no database binaries)
+
+| Server | Persistence |
+|--------|-------------|
+| memory | JSON / JSONL knowledge graph (`memory.json` in the repo by default) |
+| fake-qdrant | `meta.json` + `points.jsonl` per collection under `FAKE_QDRANT_DATA_DIR` |
+| docsearch | JSON files under `{DOCSEARCH_DATA_DIR}/index/` |
+| local-embeddings | on-disk model cache; embeddings themselves are not persisted |
+
+Leftover SQLite files (`*.db`, `*.db-wal`, `*.db-shm`, `vec0.dll`) cannot be opened on this workstation. They are ignored. Delete them and re-ingest / re-upsert:
+
+```powershell
+# After deleting old index.db files:
+# In RooCode / Cursor, call doc-ingest with { "source": "all", "force": true }
 ```
 
-### 6. Restart RooCode
+`python scripts/setup_roo.py --check` lists leftover database files.
 
-Restart VS Code or reload the window to activate the MCP servers.
+## HTTP sidecars (optional)
+
+These bind to loopback only. Stdio MCP still works if the port is already in use.
+
+| Service | Env | Production URL |
+|---------|-----|----------------|
+| Fake Qdrant REST shim | `FAKE_QDRANT_ENABLED=1`, `FAKE_QDRANT_HTTP_PORT=6333` | `http://127.0.0.1:6333/healthz` |
+| OpenAI-compatible embeddings | `EMBEDDINGS_HTTP_PORT=3100` | `http://127.0.0.1:3100/healthz` |
+
+Docsearch uses **in-process** local embeddings (`EMBEDDINGS_PROVIDER=local`). It does not need the embeddings HTTP sidecar.
 
 ## Available Servers
 
 | Server | Purpose |
 |--------|---------|
 | `central-memory` | Knowledge graph for persistent storage |
-| `central-filesystem` | File operations outside workspace |
-| `central-docsearch` | Documentation search (requires OpenAI key) |
+| `central-filesystem` | File operations outside the workspace |
+| `central-docsearch` | Documentation search (local embeddings, JSON index) |
 | `central-sequentialthinking` | Complex reasoning and problem-solving |
-| `central-fake-qdrant` | Local vector database |
-| `central-local-embeddings` | Local/offline text embeddings (no API key required) |
-| `central-everything` | Demo/test server (disabled by default) |
+| `central-fake-qdrant` | Local vector store (JSONL, brute-force cosine) |
+| `central-local-embeddings` | Local/offline text embeddings (no API key) |
+| `central-everything` | Demo/test server |
 
-## Local Embeddings Features
+## Local Embeddings
 
-The local-embeddings server provides fully offline text embeddings:
+- No API key. Transformers.js on CPU (`Xenova/all-MiniLM-L6-v2`, 384 dimensions).
+- Offline after the first model download into `MODEL_CACHE_DIR` / `MODEL_ASSETS_DIR`.
+- Tools: `embeddings`, `prefetch_model`, `health`.
 
-- **No API Key Required**: Uses local Transformers.js models
-- **Offline Operation**: Works without network after initial model download
-- **Multiple Models**: Supports any Hugging Face sentence-transformer model
-- **Batch Processing**: Embed up to 64 texts per request
-- **Caching**: LRU cache reduces computation for repeated inputs
-
-### First-Time Setup
-
-Before using offline, prefetch the model (requires network):
+Prefetch once while you still have access to the model files (GitHub / internal cache):
 
 ```
-Use prefetch_model to download the embedding model
-```
-
-### Using Local Embeddings
-
-Generate embeddings for text:
-
-```
+Use prefetch_model
 Use embeddings with input "Hello world"
 ```
 
-Or batch multiple texts:
+## Docsearch
+
+- Hybrid search: keyword token overlap + cosine over local embeddings.
+- Watches `urls.md` and `docs/` under `DOCSEARCH_DATA_DIR`.
+- Index directory: `{DOCSEARCH_DATA_DIR}/index/` (JSON, not SQLite).
+
+Add files under `data/docsearch/docs/` and URLs in `data/docsearch/urls.md`, then:
 
 ```
-Use embeddings with input ["text 1", "text 2", "text 3"]
-```
-
-## Docsearch Features
-
-The docsearch server provides:
-
-- **Recursive crawling**: Add a documentation URL and it crawls up to 100 pages
-- **Hybrid search**: Combines semantic and keyword search
-- **Auto-indexing**: Watches for changes to `urls.md` and `docs/` folder
-- **Caching**: Only re-crawls after 30 days (configurable)
-
-### Adding Documentation
-
-**Local files:** Drop files into `.roo/docsearch-data/docs/`
-
-**Web pages:** Add URLs to `.roo/docsearch-data/urls.md` (one per line)
-
-### Using Docsearch
-
-Ask the AI to search your indexed docs:
-
-```
-Search my docs for "TypeScript generics"
-```
-
-Or use the tool directly:
-
-```
+Use doc-ingest-status
 Use doc-search with query "API authentication"
+Use doc-ingest with source "all" and force true
 ```
 
 ## Troubleshooting
 
 ### Server not starting
 
-1. Check Node.js version: `node --version` (should be 20+)
-2. Verify paths in mcp.json use double backslashes on Windows
-3. Check RooCode output panel for errors
+1. `node --version` should be 20+.
+2. Paths in `mcp.json` use double backslashes on Windows.
+3. `cwd` must be this repo (so `npx tsx src/...` resolves).
+4. Check the RooCode / Cursor MCP output panel.
+5. Re-run `node scripts/validate_mcps.mjs`.
+
+### Port already in use (`EADDRINUSE` on 6333 or 3100)
+
+Stdio still works. Fake Qdrant will try to free its HTTP port. Local embeddings logs a warning and keeps stdio up if `:3100` is taken.
 
 ### Docsearch not finding results
 
-1. Verify OPENAI_API_KEY is set correctly
-2. Check that URLs were indexed: use `doc-ingest-status` tool
-3. Try `doc-ingest` with `force: true` to re-index
+1. Call `doc-ingest-status`.
+2. Confirm files/URLs exist under `DOCSEARCH_DATA_DIR`.
+3. Call `doc-ingest` with `force: true`.
+4. Delete leftover `index.db*` first; they are not migrated.
 
-### Memory server not persisting
+### Memory not persisting
 
-The memory server stores data in `memory.json` in the mcp-servers directory.
-Ensure the directory is writable.
+The memory server writes `memory.json` in this repo (or `MEMORY_FILE_PATH` if set). The directory must be writable.
 
 ### Local embeddings model not found
 
-1. Run `prefetch_model` tool with network access first
-2. Verify `MODEL_CACHE_DIR` path is writable
-3. Check that the model files exist in the cache directory
+1. Call `prefetch_model` while the model cache can be populated.
+2. Confirm `MODEL_CACHE_DIR` is writable.
+3. Confirm files exist under `model-cache/`.
 
 ## Environment Variables
 
 | Variable | Server | Description |
 |----------|--------|-------------|
-| `OPENAI_API_KEY` | docsearch | Required for embeddings |
-| `DOCSEARCH_DATA_DIR` | docsearch | Data directory location |
+| `EMBEDDINGS_PROVIDER` | docsearch | `local` (default), `openai`, or `tei` |
+| `DOCSEARCH_DATA_DIR` | docsearch | Data directory (`docs/`, `urls.md`, `index/`) |
+| `LOCAL_MODEL_CACHE_DIR` | docsearch | Transformers.js model cache |
+| `LOCAL_EMBED_MODEL` | docsearch | Default `Xenova/all-MiniLM-L6-v2` |
+| `LOCAL_EMBED_DIM` | docsearch | Default `384` |
+| `DB_PATH` | docsearch | JSON index directory (default `{DOCSEARCH_DATA_DIR}/index`) |
 | `DOCSEARCH_CRAWL_LIFETIME_DAYS` | docsearch | Days before re-crawl (default: 30) |
-| `FAKE_QDRANT_ENABLED` | fake-qdrant | Enable the server |
+| `MEMORY_FILE_PATH` | memory | Knowledge graph file (default `memory.json` in cwd) |
+| `FAKE_QDRANT_ENABLED` | fake-qdrant | Set `1` to enable the HTTP shim |
+| `FAKE_QDRANT_HTTP_HOST` | fake-qdrant | HTTP bind host (default `127.0.0.1`) |
 | `FAKE_QDRANT_HTTP_PORT` | fake-qdrant | HTTP API port (default: 6333) |
-| `MODEL_ID` | local-embeddings | Default model (default: `Xenova/all-MiniLM-L6-v2`) |
-| `MODEL_CACHE_DIR` | local-embeddings | Model cache directory (default: `./model-cache`) |
+| `FAKE_QDRANT_DATA_DIR` | fake-qdrant | JSONL collection directory |
+| `MODEL_ID` | local-embeddings | Default model (`Xenova/all-MiniLM-L6-v2`) |
+| `MODEL_CACHE_DIR` | local-embeddings | Model cache directory |
+| `MODEL_ASSETS_DIR` | local-embeddings | Alternate model assets directory |
+| `EMBEDDINGS_HTTP_PORT` | local-embeddings | If set, start OpenAI-compatible HTTP on that port |
+| `EMBEDDINGS_HTTP_HOST` | local-embeddings | HTTP bind host (default: `127.0.0.1`) |
 | `EMBED_CACHE_SIZE` | local-embeddings | LRU cache entries (default: 1000) |
 | `EMBED_CONCURRENCY` | local-embeddings | Max parallel jobs (default: 2) |
 
 ## File Structure
 
-After setup, your project should have:
+After setup, this repo looks like:
 
 ```
-your-project/
-├── .roo/
-│   ├── mcp.json              # MCP server configuration
-│   ├── rules/
-│   │   └── mcp-servers.md    # AI instructions (optional)
-│   ├── docsearch-data/       # Docsearch data (if using)
-│   │   ├── docs/             # Local files to index
-│   │   ├── urls.md           # URLs to crawl
-│   │   └── index.db          # SQLite database (auto-created)
-│   └── model-cache/          # Local embeddings model cache (if using)
-│       └── Xenova/           # Downloaded model files
-└── ...
+mcp-servers/
+├── .roo/mcp.json                 # RooCode MCP config (absolute cwd)
+├── .cursor/mcp.json              # Cursor MCP config
+├── scripts/setup_roo.py          # Writes configs + --check
+├── scripts/validate_mcps.mjs     # Stdio + HTTP smoke test
+├── data/fake-qdrant/             # JSONL collections
+├── data/docsearch/
+│   ├── docs/                     # Local files to index
+│   ├── urls.md                   # URLs to crawl
+│   └── index/                    # JSON index (auto-created)
+├── model-cache/                  # Transformers.js weights
+└── src/
+    ├── memory/
+    ├── filesystem/
+    ├── everything/
+    ├── sequentialthinking/
+    ├── fake-qdrant/
+    ├── local-embeddings/
+    └── docsearch/
 ```
 
 ## Links
 
+- Per-server docs: [src/docsearch/README.md](src/docsearch/README.md), [src/fake-qdrant/README.md](src/fake-qdrant/README.md), [src/local-embeddings/README.md](src/local-embeddings/README.md)
+- AI usage playbook: [docs/mcp-servers-rules.md](docs/mcp-servers-rules.md) (copied to `.roo/rules/mcp-servers.md`)
 - [RooCode Custom Instructions](https://docs.roocode.com/features/custom-instructions)
 - [Model Context Protocol](https://modelcontextprotocol.io/)
-- [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk)

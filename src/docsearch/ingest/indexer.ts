@@ -16,6 +16,9 @@ export class Indexer {
 
   async embedNewChunks(batchSize: number = 64): Promise<void> {
     const embedder = getEmbedder();
+    if (!embedder?.embed) {
+      return;
+    }
     const toEmbed = await this.adapter.getChunksToEmbed();
 
     for (let i = 0; i < toEmbed.length; i += batchSize) {

@@ -1,12 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$comment": "Copy this to .cursor/mcp.json for auto-start MCP servers. All 'command' type servers auto-start via stdio. SSE/HTTP types require central-mcp running first.",
+  "$comment": "Copy this to .cursor/mcp.json for auto-start MCP servers. All 'command' type servers auto-start via stdio. Or run: python scripts/setup_roo.py",
   "mcpServers": {
-    "mcp-docs": {
-      "$comment": "External HTTP MCP server (always available)",
-      "type": "http",
-      "url": "https://modelcontextprotocol.io/mcp"
-    },
     "central-memory": {
       "$comment": "Auto-start: Knowledge graph memory server",
       "command": "npx",
@@ -28,25 +23,36 @@
       "args": ["tsx", "src/sequentialthinking/index.ts"]
     },
     "central-fake-qdrant": {
-      "$comment": "Auto-start: Fake Qdrant vector DB with optional HTTP shim on port 6333",
+      "$comment": "Auto-start: Fake Qdrant JSONL store with optional HTTP shim on port 6333",
       "command": "npx",
       "args": ["tsx", "src/fake-qdrant/index.ts"],
       "env": {
         "FAKE_QDRANT_ENABLED": "1",
-        "FAKE_QDRANT_HTTP_PORT": "6333"
+        "FAKE_QDRANT_HTTP_PORT": "6333",
+        "FAKE_QDRANT_DATA_DIR": "./data/fake-qdrant"
       }
     },
     "central-local-embeddings": {
-      "$comment": "Auto-start: Local/offline text embeddings using Transformers.js (model cached in ./model-cache)",
+      "$comment": "Auto-start: Local embeddings (Transformers.js) with optional HTTP on port 3100",
       "command": "npx",
-      "args": ["tsx", "src/local-embeddings/index.ts"]
+      "args": ["tsx", "src/local-embeddings/index.ts"],
+      "env": {
+        "MODEL_ID": "Xenova/all-MiniLM-L6-v2",
+        "MODEL_CACHE_DIR": "./model-cache",
+        "MODEL_ASSETS_DIR": "./model-cache",
+        "EMBEDDINGS_HTTP_PORT": "3100",
+        "EMBEDDINGS_HTTP_HOST": "127.0.0.1"
+      }
     },
     "central-docsearch": {
-      "$comment": "Auto-start: Document search with local embeddings (offline-first, no API key required)",
+      "$comment": "Auto-start: Document search with local embeddings (JSON index, no SQLite)",
       "command": "npx",
       "args": ["tsx", "src/docsearch/index.ts"],
       "env": {
-        "DOCSEARCH_DATA_DIR": "./data"
+        "EMBEDDINGS_PROVIDER": "local",
+        "DOCSEARCH_DATA_DIR": "./data/docsearch",
+        "LOCAL_EMBED_MODEL": "Xenova/all-MiniLM-L6-v2",
+        "LOCAL_MODEL_CACHE_DIR": "./model-cache"
       }
     }
   }

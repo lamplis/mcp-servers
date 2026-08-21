@@ -2,7 +2,7 @@ import { existsSync, rmSync } from 'fs';
 
 import { beforeEach } from 'vitest';
 
-const TEST_DB_PATH = './test/test.db';
+const TEST_INDEX_DIR = './test/test-index';
 
 // Polyfill File constructor for Node.js environment (needed by undici in testcontainers)
 if (typeof globalThis.File === 'undefined') {
@@ -21,9 +21,9 @@ if (typeof globalThis.File === 'undefined') {
 }
 
 beforeEach(() => {
-  if (existsSync(TEST_DB_PATH)) {
-    rmSync(TEST_DB_PATH, { force: true });
+  if (existsSync(TEST_INDEX_DIR)) {
+    rmSync(TEST_INDEX_DIR, { recursive: true, force: true });
   }
 });
 
-export const testDbPath = TEST_DB_PATH;
+export const testDbPath = TEST_INDEX_DIR;

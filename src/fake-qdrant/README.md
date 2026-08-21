@@ -8,9 +8,9 @@ Fake Qdrant implements a subset of the Qdrant vector database API, offering:
 
 - **MCP Tools Interface** - Direct integration with MCP-compatible clients (VS Code, RooCode, Claude Desktop)
 - **HTTP API Shim** - Qdrant-compatible REST API on port 6333 (optional)
-- **SQLite Vector Search** - Efficient KNN search using sqlite-vec extension
-- **Persistent Storage** - Data persisted to SQLite databases with WAL mode
-- **Zero External Services** - Node.js implementation, no Docker or external services required
+- **JSONL Vector Search** - Brute-force cosine similarity in pure JavaScript (no database binaries)
+- **Persistent Storage** - Data persisted as `meta.json` + `points.jsonl` per collection
+- **Zero External Services** - Node.js implementation, no Docker, SQLite, or Qdrant binary
 
 ## Architecture
 
@@ -35,9 +35,8 @@ Fake Qdrant implements a subset of the Qdrant vector database API, offering:
                              │
                              ▼
               ┌─────────────────────────────┐
-              │     SQLite + sqlite-vec     │
-              │   vec0 Virtual Tables       │
-              │   (KNN Vector Search)       │
+              │     JSONL + in-memory maps  │
+              │   brute-force cosine KNN    │
               └─────────────────────────────┘
 ```
 
@@ -53,8 +52,8 @@ The server exposes the following MCP tools:
 | `fake_qdrant_delete_collection` | Remove a collection and its data |
 | `fake_qdrant_upsert_points` | Insert or update vector points in a collection |
 | `fake_qdrant_query_points` | Run vector similarity search (KNN) |
-| `fake_qdrant_compact_collection` | Run SQLite VACUUM to optimize database |
-| `fake_qdrant_persist_indexes` | Flush WAL checkpoint to ensure data durability |
+| `fake_qdrant_compact_collection` | Rewrite unique JSONL snapshot (latest id wins) |
+| `fake_qdrant_persist_indexes` | Flush dirty collections to compact JSONL files |
 
 ### Tool Details
 
@@ -180,7 +179,7 @@ RooCode uses the same MCP configuration format. Add to your RooCode MCP settings
       "env": {
         "FAKE_QDRANT_ENABLED": "1",
         "FAKE_QDRANT_HTTP_PORT": "6333",
-        "FAKE_QDRANT_DATA_DIR": "./data/qdrant"
+        "FAKE_QDRANT_DATA_DIR": "./data/fake-qdrant"
       }
     }
   }
@@ -213,7 +212,7 @@ Add to `.cursor/mcp.json`:
 | `FAKE_QDRANT_ENABLED` | `0` | Set to `1` to enable the HTTP API shim |
 | `FAKE_QDRANT_HTTP_PORT` | `6333` | HTTP server port |
 | `FAKE_QDRANT_HTTP_HOST` | `127.0.0.1` | HTTP server bind address |
-| `FAKE_QDRANT_DATA_DIR` | `./data` | Directory for persistent storage |
+| `FAKE_QDRANT_DATA_DIR` | `./data/fake-qdrant` | Directory for JSONL collections (`meta.json` + `points.jsonl`) |
 
 ## Usage Examples
 
@@ -373,8 +372,8 @@ curl -X POST "http://localhost:6333/collections/documents/points/delete" \
    }
    ```
 
-3. **SQLite uses WAL mode:**
-   Data is automatically persisted. Use `fake_qdrant_persist_indexes` to force a WAL checkpoint.
+3. **JSONL is written on every upsert:**
+   Data is appended to `points.jsonl`. Use `fake_qdrant_compact_collection` or `fake_qdrant_persist_indexes` to rewrite a unique snapshot.
 
 ### Vector Dimension Mismatch
 
@@ -405,23 +404,21 @@ curl -X POST "http://localhost:6333/collections/documents/points/delete" \
 
 **Solutions:**
 
-1. **Compact the collection (runs VACUUM):**
+1. **Compact the collection (rewrite unique JSONL):**
    ```bash
    curl -X POST "http://localhost:6333/collections/my-collection/compact"
    ```
 
-2. **Check for WAL files:**
+2. **Inspect collection files:**
    ```powershell
-   # SQLite WAL files should be automatically merged
-   # If stuck, delete WAL files (data loss possible if uncommitted)
-   Remove-Item ".\data\my-collection.db-wal"
-   Remove-Item ".\data\my-collection.db-shm"
+   Get-ChildItem ".\data\my-collection"
+   # Expect meta.json and points.jsonl
    ```
 
 3. **Full reset (last resort):**
    ```powershell
    # Backup data first!
-   Remove-Item ".\data\my-collection.db"
+   Remove-Item -Recurse ".\data\my-collection"
    ```
 
 ### HTTP API Returns 404
@@ -448,22 +445,21 @@ curl -X POST "http://localhost:6333/collections/documents/points/delete" \
    - Collection names are URL-encoded
    - Points endpoint uses `PUT` for upsert, `POST` for query
 
-## Migration from JSONL Format
+## Storage format
 
-If you have existing data from the previous JSONL + HNSW implementation, you can migrate it to the new SQLite format:
+JSONL is the native format (one directory per collection):
 
-```powershell
-cd src/fake-qdrant
-npm run migrate
-# Or specify a custom data directory:
-npx tsx migrate.ts "C:\path\to\data"
+```
+data/fake-qdrant/{collection}/
+  meta.json
+  points.jsonl
 ```
 
-The migration utility will:
-1. Find all old-style collections (directories with `meta.json` and `points.jsonl`)
-2. Create new SQLite databases for each collection
-3. Import all points into the new format
-4. Print instructions for removing old data directories
+Leftover `{name}.db` SQLite files cannot be converted on locked-down workstations (database binaries are blocked). Re-upsert points instead:
+
+```powershell
+npx tsx src/fake-qdrant/migrate.ts
+```
 
 ## Development
 
@@ -477,6 +473,14 @@ npm run build
 
 ### Running Tests
 
+From the repo root, smoke-test this server together with the rest of the Roo set:
+
+```powershell
+node scripts/validate_mcps.mjs
+```
+
+Package tests:
+
 ```powershell
 cd src/fake-qdrant
 npm test              # Run tests once
@@ -489,7 +493,7 @@ npm run test:watch    # Run tests in watch mode
 src/fake-qdrant/
 ├── index.ts           # Entry point (stdio transport)
 ├── server.ts          # MCP server and tool registration
-├── store.ts           # SQLite + sqlite-vec storage layer
+├── store.ts           # JSONL + in-memory cosine store
 ├── qdrant-http.ts     # HTTP API shim
 ├── __tests__/
 │   └── qdrant-http.test.ts  # Integration tests

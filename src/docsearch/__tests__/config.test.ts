@@ -1,3 +1,5 @@
+import { join } from 'node:path';
+
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 
 const originalEnv = process.env;
@@ -47,8 +49,8 @@ describe('Configuration', () => {
       expect(CONFIG.LOCAL_EMBED_MODEL).toBe('Xenova/all-MiniLM-L6-v2');
       expect(CONFIG.LOCAL_EMBED_DIM).toBe(384);
       expect(CONFIG.LOCAL_MODEL_CACHE_DIR).toBe('./model-cache');
-      expect(CONFIG.FILE_ROOTS).toEqual(['.']);
-      expect(CONFIG.DB_PATH).toBe('./data/index.db');
+      expect(CONFIG.FILE_ROOTS).toEqual([join('./data', 'docs')]);
+      expect(CONFIG.DB_PATH).toBe(join('./data', 'index'));
     });
 
     it('should use environment variables when set', async () => {
@@ -58,7 +60,7 @@ describe('Configuration', () => {
       process.env.OPENAI_EMBED_MODEL = 'custom-model';
       process.env.OPENAI_EMBED_DIM = '768';
       process.env.TEI_ENDPOINT = 'http://tei-server:8080';
-      process.env.DB_PATH = '/custom/path/db.sqlite';
+      process.env.DB_PATH = '/custom/path/index';
 
       const { CONFIG } = await import('../src/shared/config.js');
 
@@ -68,7 +70,7 @@ describe('Configuration', () => {
       expect(CONFIG.OPENAI_EMBED_MODEL).toBe('custom-model');
       expect(CONFIG.OPENAI_EMBED_DIM).toBe(768);
       expect(CONFIG.TEI_ENDPOINT).toBe('http://tei-server:8080');
-      expect(CONFIG.DB_PATH).toBe('/custom/path/db.sqlite');
+      expect(CONFIG.DB_PATH).toBe('/custom/path/index');
     });
 
     it('should validate embeddings provider', async () => {
@@ -229,7 +231,7 @@ describe('Configuration', () => {
 
       const { CONFIG } = await import('../src/shared/config.js');
 
-      expect(CONFIG.FILE_ROOTS).toEqual(['.']); // Uses default when empty
+      expect(CONFIG.FILE_ROOTS).toEqual([join('./data', 'docs')]); // Uses default when empty
       expect(CONFIG.CONFLUENCE_SPACES).toEqual([]);
     });
 

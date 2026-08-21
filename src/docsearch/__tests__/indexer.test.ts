@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 import { testDbPath } from './setup.js';
-import { SqliteAdapter } from '../src/ingest/adapters/sqlite.js';
+import { JsonAdapter } from '../src/ingest/adapters/json.js';
 import { Indexer } from '../src/ingest/indexer.js';
+import { getEmbedder } from '../src/ingest/embeddings.js';
 
 import type { DocumentInput, ChunkInput } from '../src/shared/types.js';
 
@@ -19,11 +20,20 @@ vi.mock('../src/ingest/embeddings.js', () => ({
 }));
 
 describe('Indexer', () => {
-  let adapter: SqliteAdapter;
+  let adapter: JsonAdapter;
   let indexer: Indexer;
 
   beforeEach(async () => {
-    adapter = new SqliteAdapter({ path: testDbPath, embeddingDim: 1536 });
+    vi.mocked(getEmbedder).mockReturnValue({
+      dim: 1536,
+      embed: vi
+        .fn()
+        .mockResolvedValue([
+          new Float32Array(Array(1536).fill(0.1)),
+          new Float32Array(Array(1536).fill(0.2)),
+        ]),
+    });
+    adapter = new JsonAdapter({ path: testDbPath, embeddingDim: 1536 });
     await adapter.init();
     indexer = new Indexer(adapter);
   });
@@ -50,8 +60,7 @@ describe('Indexer', () => {
       const docId = await indexer.upsertDocument(sampleDoc);
       expect(docId).toBeGreaterThan(0);
 
-      // @ts-expect-error - accessing private property for testing
-      const result = adapter.db.prepare('SELECT * FROM documents WHERE id = ?').get(docId);
+      const result = (await adapter.findDocuments({ id: docId }))[0];
       expect(result).toBeTruthy();
       expect(result.uri).toBe(sampleDoc.uri);
       expect(result.hash).toBe(sampleDoc.hash);
@@ -66,8 +75,7 @@ describe('Indexer', () => {
 
       expect(docId1).toBe(docId2);
 
-      // @ts-expect-error - accessing private property for testing
-      const result = adapter.db.prepare('SELECT * FROM documents WHERE id = ?').get(docId2);
+      const result = (await adapter.findDocuments({ id: docId2 }))[0];
       expect(result.hash).toBe('xyz789');
       expect(result.title).toBe('Updated Title');
     });
@@ -96,8 +104,7 @@ describe('Indexer', () => {
       const docId = await indexer.upsertDocument(minimalDoc);
       expect(docId).toBeGreaterThan(0);
 
-      // @ts-expect-error - accessing private property for testing
-      const result = adapter.db.prepare('SELECT * FROM documents WHERE id = ?').get(docId);
+      const result = (await adapter.findDocuments({ id: docId }))[0];
       expect(result.uri).toBe(minimalDoc.uri);
       expect(result.repo).toBeNull();
       expect(result.path).toBeNull();
@@ -132,10 +139,7 @@ describe('Indexer', () => {
 
       await indexer.insertChunks(docId, chunks);
 
-      // @ts-expect-error - accessing private property for testing
-      const result = adapter.db
-        .prepare('SELECT * FROM chunks WHERE document_id = ? ORDER BY chunk_index')
-        .all(docId);
+      const result = await adapter.findChunks({ documentId: docId });
       expect(result).toHaveLength(3);
 
       expect(result[0].content).toBe('First chunk');
@@ -156,10 +160,7 @@ describe('Indexer', () => {
     it('should handle empty chunks array', async () => {
       await indexer.insertChunks(docId, []);
 
-      // @ts-expect-error - accessing private property for testing
-      const result = adapter.db
-        .prepare('SELECT COUNT(*) as count FROM chunks WHERE document_id = ?')
-        .get(docId);
+      const result = { count: (await adapter.findChunks({ documentId: docId })).length };
       expect(result.count).toBe(0);
     });
   });
@@ -192,29 +193,22 @@ describe('Indexer', () => {
     it('should embed new chunks', async () => {
       await indexer.embedNewChunks(1);
 
-      // @ts-expect-error - accessing private property for testing
-      const embeddedCount = adapter.db.prepare('SELECT COUNT(*) as count FROM chunk_vec_map').get();
+      const stats = await adapter.getIndexStats();
+      const embeddedCount = { count: stats.embeddedChunks };
       expect(embeddedCount.count).toBe(2);
 
-      // @ts-expect-error - accessing private property for testing
-      const vecCount = adapter.db.prepare('SELECT COUNT(*) as count FROM vec_chunks').get();
+      const vecCount = { count: stats.embeddedChunks };
       expect(vecCount.count).toBe(2);
     });
 
     it('should not re-embed already embedded chunks', async () => {
       await indexer.embedNewChunks();
 
-      // @ts-expect-error - accessing private property for testing
-      const initialCount = adapter.db
-        .prepare('SELECT COUNT(*) as count FROM chunk_vec_map')
-        .get().count;
+      const initialCount = (await adapter.getIndexStats()).embeddedChunks;
 
       await indexer.embedNewChunks();
 
-      // @ts-expect-error - accessing private property for testing
-      const finalCount = adapter.db
-        .prepare('SELECT COUNT(*) as count FROM chunk_vec_map')
-        .get().count;
+      const finalCount = (await adapter.getIndexStats()).embeddedChunks;
       expect(finalCount).toBe(initialCount);
     });
 
@@ -256,28 +250,16 @@ describe('Indexer', () => {
       await indexer.insertChunks(docId, chunks);
       await indexer.embedNewChunks();
 
-      // @ts-expect-error - accessing private property for testing
-      const initialChunkCount = adapter.db
-        .prepare('SELECT COUNT(*) as count FROM chunks WHERE document_id = ?')
-        .get(docId).count;
-      // @ts-expect-error - accessing private property for testing
-      const initialVecCount = adapter.db
-        .prepare('SELECT COUNT(*) as count FROM chunk_vec_map')
-        .get().count;
+      const initialChunkCount = (await adapter.findChunks({ documentId: docId })).length;
+      const initialVecCount = (await adapter.getIndexStats()).embeddedChunks;
       expect(initialChunkCount).toBe(2);
       expect(initialVecCount).toBe(2);
 
       const updatedDoc = { ...doc, hash: 'updated456' };
       await indexer.upsertDocument(updatedDoc);
 
-      // @ts-expect-error - accessing private property for testing
-      const finalChunkCount = adapter.db
-        .prepare('SELECT COUNT(*) as count FROM chunks WHERE document_id = ?')
-        .get(docId).count;
-      // @ts-expect-error - accessing private property for testing
-      const finalVecCount = adapter.db
-        .prepare('SELECT COUNT(*) as count FROM chunk_vec_map')
-        .get().count;
+      const finalChunkCount = (await adapter.findChunks({ documentId: docId })).length;
+      const finalVecCount = (await adapter.getIndexStats()).embeddedChunks;
       expect(finalChunkCount).toBe(0);
       expect(finalVecCount).toBe(0);
     });

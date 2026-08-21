@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "central-memory": {
-      "$comment": "Knowledge graph memory server",
+      "$comment": "Knowledge graph memory server (JSONL, no database)",
       "command": "npx",
       "args": ["tsx", "src/memory/index.ts"],
       "cwd": "<MCP_SERVERS_PATH>",
@@ -16,17 +16,13 @@
       "disabled": false,
       "alwaysAllow": []
     },
-    "central-docsearch": {
-      "$comment": "Document search with local embeddings (offline-first, no API key required)",
+    "central-everything": {
+      "$comment": "MCP demo/test server (use get-env for diagnosis)",
       "command": "npx",
-      "args": ["tsx", "src/docsearch/index.ts"],
+      "args": ["tsx", "src/everything/index.ts", "stdio"],
       "cwd": "<MCP_SERVERS_PATH>",
-      "env": {
-        "EMBEDDINGS_PROVIDER": "local",
-        "DOCSEARCH_DATA_DIR": "<PROJECT_PATH>\\.roo\\docsearch-data"
-      },
       "disabled": false,
-      "alwaysAllow": ["doc-search", "doc-ingest", "doc-ingest-status"]
+      "alwaysAllow": ["get-env"]
     },
     "central-sequentialthinking": {
       "$comment": "Sequential thinking/reasoning server",
@@ -37,13 +33,14 @@
       "alwaysAllow": []
     },
     "central-fake-qdrant": {
-      "$comment": "Local Qdrant-compatible vector database",
+      "$comment": "Local Qdrant-compatible vector store (JSONL files + optional HTTP :6333)",
       "command": "npx",
       "args": ["tsx", "src/fake-qdrant/index.ts"],
       "cwd": "<MCP_SERVERS_PATH>",
       "env": {
         "FAKE_QDRANT_ENABLED": "1",
-        "FAKE_QDRANT_HTTP_PORT": "6333"
+        "FAKE_QDRANT_HTTP_PORT": "6333",
+        "FAKE_QDRANT_DATA_DIR": "<MCP_SERVERS_PATH>\\data\\fake-qdrant"
       },
       "disabled": false,
       "alwaysAllow": [
@@ -58,12 +55,33 @@
       ]
     },
     "central-local-embeddings": {
-      "$comment": "Local/offline text embeddings using Transformers.js",
+      "$comment": "Local Transformers.js embeddings (optional OpenAI-compatible HTTP :3100)",
       "command": "npx",
       "args": ["tsx", "src/local-embeddings/index.ts"],
       "cwd": "<MCP_SERVERS_PATH>",
+      "env": {
+        "MODEL_ID": "Xenova/all-MiniLM-L6-v2",
+        "MODEL_CACHE_DIR": "<MCP_SERVERS_PATH>\\model-cache",
+        "MODEL_ASSETS_DIR": "<MCP_SERVERS_PATH>\\model-cache",
+        "EMBEDDINGS_HTTP_PORT": "3100",
+        "EMBEDDINGS_HTTP_HOST": "127.0.0.1"
+      },
       "disabled": false,
       "alwaysAllow": ["embeddings", "prefetch_model", "health"]
+    },
+    "central-docsearch": {
+      "$comment": "Document search with in-process local embeddings (JSON index, no SQLite)",
+      "command": "npx",
+      "args": ["tsx", "src/docsearch/index.ts"],
+      "cwd": "<MCP_SERVERS_PATH>",
+      "env": {
+        "EMBEDDINGS_PROVIDER": "local",
+        "DOCSEARCH_DATA_DIR": "<PROJECT_PATH>\\.roo\\docsearch-data",
+        "LOCAL_EMBED_MODEL": "Xenova/all-MiniLM-L6-v2",
+        "LOCAL_MODEL_CACHE_DIR": "<MCP_SERVERS_PATH>\\model-cache"
+      },
+      "disabled": false,
+      "alwaysAllow": ["doc-search", "doc-ingest", "doc-ingest-status"]
     }
   }
 }

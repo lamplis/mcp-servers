@@ -34,6 +34,51 @@ export interface ChunkContent {
   readonly end_line: number | null;
 }
 
+export interface IndexStats {
+  readonly documents: number;
+  readonly chunks: number;
+  readonly embeddedChunks: number;
+}
+
+export interface SourceBreakdownRow {
+  readonly source: string;
+  readonly documents: number;
+  readonly chunks: number;
+}
+
+export interface RecentDocumentRow {
+  readonly title: string | null;
+  readonly source: string;
+  readonly repo: string | null;
+  readonly path: string | null;
+  readonly mtime: number | null;
+}
+
+export interface DocumentRecord {
+  readonly id: number;
+  readonly source: string;
+  readonly uri: string;
+  readonly repo: string | null;
+  readonly path: string | null;
+  readonly title: string | null;
+  readonly lang: string | null;
+  readonly hash: string;
+  readonly mtime: number | null;
+  readonly version: string | null;
+  readonly extra_json: string | null;
+}
+
+export interface ChunkRecord {
+  readonly id: number;
+  readonly document_id: number;
+  readonly chunk_index: number;
+  readonly content: string;
+  readonly start_line: number | null;
+  readonly end_line: number | null;
+  readonly token_count: number | null;
+  readonly path?: string | null;
+}
+
 export interface DatabaseAdapter {
   init(): Promise<void>;
   close(): Promise<void>;
@@ -72,8 +117,24 @@ export interface DatabaseAdapter {
   // Cleanup operations
   cleanupDocumentChunks(documentId: number): Promise<void>;
 
-  // Raw query for statistics (adapter specific)
-  rawQuery(sql: string, params?: unknown[]): Promise<Record<string, unknown>[]>;
+  // Stats / inspection (no SQL)
+  getIndexStats(): Promise<IndexStats>;
+  getSourceBreakdown(): Promise<SourceBreakdownRow[]>;
+  getRecentDocuments(limit: number): Promise<RecentDocumentRow[]>;
+  getLastCrawlTime(startUrl: string): Promise<number | null>;
+  findDocuments(filter?: {
+    lang?: string;
+    excludeLang?: string;
+    id?: number;
+    uri?: string;
+    uriContains?: string;
+    source?: string;
+  }): Promise<DocumentRecord[]>;
+  findChunks(filter?: {
+    documentId?: number;
+    lang?: string;
+    contentContains?: string;
+  }): Promise<ChunkRecord[]>;
 }
 
 export interface SearchFilters {

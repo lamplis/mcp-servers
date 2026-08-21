@@ -239,7 +239,7 @@ async function ensureDataDirectories(): Promise<void> {
   console.error(`Data directory: ${CONFIG.DATA_DIR}`);
   console.error(`Docs directory: ${CONFIG.DOCS_DIR}`);
   console.error(`URLs file: ${CONFIG.URLS_FILE}`);
-  console.error(`Database: ${CONFIG.DB_PATH}`);
+  console.error(`Index directory: ${CONFIG.DB_PATH}`);
 }
 
 /**
