@@ -73,6 +73,16 @@ export async function startQdrantHttpServer(
   };
 }
 
+function requestPath(req: http.IncomingMessage): string {
+  const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
+  return pathname.replace(/\/+$/, "") || "/";
+}
+
+function isRead(method: string | undefined): boolean {
+  const m = (method ?? "").toUpperCase();
+  return m === "GET" || m === "HEAD";
+}
+
 async function handleRequest(
   req: http.IncomingMessage,
   res: http.ServerResponse,
@@ -81,18 +91,28 @@ async function handleRequest(
   if (req.method === "OPTIONS") {
     return sendJson(res, 200, {});
   }
-  const url = new URL(req.url ?? "/", "http://localhost");
-  
+  const path = requestPath(req);
+
   // Debug logging for delete requests
-  if (req.method === "POST" && url.pathname.includes("/points/delete")) {
-    console.error(`[fake-qdrant] DELETE request: ${req.method} ${url.pathname}`);
+  if (req.method === "POST" && path.includes("/points/delete")) {
+    console.error(`[fake-qdrant] DELETE request: ${req.method} ${path}`);
   }
 
-  if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/healthz")) {
-    return sendJson(res, 200, { status: "ok" });
+  if (
+    isRead(req.method) &&
+    (path === "/" ||
+      path === "/healthz" ||
+      path === "/readyz" ||
+      path === "/livez")
+  ) {
+    return sendJson(res, 200, {
+      status: "ok",
+      title: "qdrant - vector search engine",
+      version: "1.12.0",
+    });
   }
 
-  if (req.method === "GET" && url.pathname === "/collections") {
+  if (isRead(req.method) && path === "/collections") {
     const collections = await store.listCollections();
     return sendJson(res, 200, {
       result: {
@@ -115,7 +135,7 @@ async function handleRequest(
     });
   }
 
-  const match = url.pathname.match(/^\/collections\/([^/]+)(\/.*)?$/);
+  const match = path.match(/^\/collections\/([^/]+)(\/.*)?$/);
   if (!match) {
     return sendJson(res, 404, { status: { error: "not found" } });
   }

@@ -123,7 +123,7 @@ fake_qdrant_persist_indexes {}
 
 - Chunk to keep each input under ~20k characters. Batch up to 64 texts.
 - If `health` says the model is missing: `prefetch_model`. If that fails (offline / no cache), stop and say so; do not pretend to embed.
-- Collection `size` **must** match the embedding dimension. Do not mix models in one collection.
+- Collection `size` **must** match the embedding dimension. Do not mix models in one collection. Local MiniLM / RooCode-against-this-sidecar is **384** (`Xenova/all-MiniLM-L6-v2`, base URL `http://127.0.0.1:3100/v1`, dummy key `local`). Do not pick OpenAI 1536/3072 models for that path.
 - After large upserts: `fake_qdrant_persist_indexes`. If scores look duplicated/stale: `fake_qdrant_compact_collection`.
 - Do **not** curl `:3100` or `:6333` while these MCP tools work. HTTP is a sidecar for other apps, not the assistant’s first path.
 - Do **not** `fake_qdrant_delete_collection` unless the user asked.
@@ -157,5 +157,5 @@ Do **not** use `echo`, image, gzip, long-running, elicitation, or sampling tools
 | doc-search empty | Ingest recipe. Do not hallucinate. |
 | embeddings model missing | `prefetch_model`; if offline, fail clearly. |
 | filesystem path denied | `list_allowed_directories`; ask to widen the root in `mcp.json`. |
-| fake-qdrant dimension error | Recreate collection at 384 or embed with the matching model. |
+| fake-qdrant dimension error | Recreate the collection at the embedder's size (384 for local MiniLM / RooCode `http://127.0.0.1:3100/v1`). Do not mix with 1536/3072. |
 | leftover `*.db` | Ignore. JSON/JSONL only. Delete and re-ingest/re-upsert if the user wants a clean store. |

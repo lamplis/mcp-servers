@@ -382,15 +382,17 @@ curl -X POST "http://localhost:6333/collections/documents/points/delete" \
 **Solutions:**
 
 1. **Verify embedding model output dimension:**
-   - OpenAI `text-embedding-3-small`: 1536 dimensions
-   - OpenAI `text-embedding-ada-002`: 1536 dimensions
-   - Sentence Transformers `all-MiniLM-L6-v2`: 384 dimensions
+   - Local sidecar `Xenova/all-MiniLM-L6-v2` (`http://127.0.0.1:3100/v1`): **384** — use this for RooCode codebase indexing
+   - OpenAI `text-embedding-3-small` / `text-embedding-ada-002`: 1536 (only if a real OpenAI-compatible API is reachable)
+   - OpenAI `text-embedding-3-large`: 3072 (avoid here; doubles JSONL/RAM/brute-force CPU)
+
+   Fake Qdrant does not care about the model name. Collection `size` must match the vector length. Do not mix 384 and 1536 in one collection.
 
 2. **Match collection size to your model:**
    ```json
    {
      "name": "my-collection",
-     "size": 1536,
+     "size": 384,
      "distance": "Cosine"
    }
    ```

@@ -150,6 +150,31 @@ Use prefetch_model
 Use embeddings with input "Hello world"
 ```
 
+## RooCode codebase indexing (OpenAI-compatible local embedder)
+
+Point RooCode at the **local-embeddings HTTP sidecar**, not at `api.openai.com`. `central-local-embeddings` must be running with `EMBEDDINGS_HTTP_PORT=3100` (already in `.roo/mcp.json` after `python scripts/setup_roo.py`). Confirm with `GET http://127.0.0.1:3100/healthz`.
+
+Fill RooCode's OpenAI-compatible provider as:
+
+| Field | Value |
+|-------|--------|
+| Base URL | `http://127.0.0.1:3100/v1` |
+| API key | `local` (the sidecar does not validate it; it must be non-empty if RooCode requires a key) |
+| Model | `Xenova/all-MiniLM-L6-v2` |
+| Dimensions | `384` |
+
+Qdrant (fake-qdrant on `http://127.0.0.1:6333`): create the index collection at **384 / Cosine**. Do not use 1536 or 3072 with this embedder.
+
+If RooCode still lists cloud OpenAI models, do **not** pick them on this workstation:
+
+| Model | Dim | Notes |
+|-------|-----|--------|
+| text-embedding-3-small | 1536 | Only if a real OpenAI-compatible API is reachable. Worst fit vs local MiniLM. |
+| text-embedding-ada-002 | 1536 | Same width as 3-small; older. |
+| text-embedding-3-large | 3072 | Avoid. Doubles JSONL/RAM/brute-force CPU in fake-qdrant. |
+
+If the Base URL field must be a host with no `/v1` suffix, use `http://127.0.0.1:3100` (the sidecar also accepts `POST /embeddings`).
+
 ## Docsearch
 
 - Hybrid search: keyword token overlap + cosine over local embeddings.
@@ -173,6 +198,20 @@ Use doc-ingest with source "all" and force true
 3. `cwd` must be this repo (so `npx tsx src/...` resolves).
 4. Check the RooCode / Cursor MCP output panel.
 5. Re-run `node scripts/validate_mcps.mjs`.
+
+### Browser `/healthz` shows "not found"
+
+Those JSON bodies mean the HTTP sidecars **are** running. A 404 on `/healthz` was usually a browser `HEAD` or a trailing slash (`/healthz/`), which older shims treated as unknown routes.
+
+- Embeddings 404 looks like `{ "error": { "message": "not found", "type": "invalid_request_error" } }`
+- Fake Qdrant 404 looks like `{ "status": { "error": "not found" } }`
+
+Reload the window so MCP restarts, then open:
+
+- `http://127.0.0.1:3100/healthz`
+- `http://127.0.0.1:6333/healthz`
+
+Expect `"status":"ok"`. `GET /v1` and `GET /v1/models` on `:3100` are also valid. Do not test the RooCode base URL `http://127.0.0.1:3100/v1` as a health page on an old process.
 
 ### Port already in use (`EADDRINUSE` on 6333 or 3100)
 

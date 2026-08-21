@@ -97,7 +97,7 @@ describe("Fake Qdrant NRT (Non-Regression Test)", () => {
   it("Step 1: GET /healthz returns ok", async () => {
     const res = await request("GET", "/healthz");
     expect(res.status).toBe(200);
-    expect(res.data).toEqual({ status: "ok" });
+    expect(res.data).toMatchObject({ status: "ok" });
   });
 
   // --- 2. List empty collections ---

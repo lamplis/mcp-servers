@@ -74,19 +74,50 @@ export async function startEmbeddingsHttpServer(
   };
 }
 
+function requestPath(req: http.IncomingMessage): string {
+  const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
+  return pathname.replace(/\/+$/, "") || "/";
+}
+
+function isRead(method: string | undefined): boolean {
+  const m = (method ?? "").toUpperCase();
+  return m === "GET" || m === "HEAD";
+}
+
 async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse) {
   if (req.method === "OPTIONS") {
     return sendJson(res, 200, {});
   }
 
-  const url = new URL(req.url ?? "/", "http://localhost");
-  const path = url.pathname.replace(/\/$/, "") || "/";
+  const path = requestPath(req);
 
-  if (req.method === "GET" && (path === "/" || path === "/healthz" || path === "/v1/healthz")) {
+  if (
+    isRead(req.method) &&
+    (path === "/" ||
+      path === "/healthz" ||
+      path === "/v1/healthz" ||
+      path === "/v1")
+  ) {
     return sendJson(res, 200, {
       status: "ok",
       model: getDefaultModelId(),
       cacheDir: getCacheDir(),
+      embeddings: "/v1/embeddings",
+    });
+  }
+
+  if (isRead(req.method) && path === "/v1/models") {
+    const id = getDefaultModelId();
+    return sendJson(res, 200, {
+      object: "list",
+      data: [
+        {
+          id,
+          object: "model",
+          created: 0,
+          owned_by: "local",
+        },
+      ],
     });
   }
 

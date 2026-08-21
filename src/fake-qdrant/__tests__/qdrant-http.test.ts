@@ -96,13 +96,27 @@ describe('Fake Qdrant HTTP API Integration Tests', () => {
     it('should return ok status on root endpoint', async () => {
       const response = await httpRequest('GET', '/');
       expect(response.status).toBe(200);
-      expect(response.data).toEqual({ status: 'ok' });
+      expect(response.data).toMatchObject({ status: 'ok' });
     });
 
     it('should return ok status on /healthz endpoint', async () => {
       const response = await httpRequest('GET', '/healthz');
       expect(response.status).toBe(200);
-      expect(response.data).toEqual({ status: 'ok' });
+      expect(response.data).toMatchObject({ status: 'ok' });
+    });
+
+    it('should accept HEAD and trailing slash on /healthz', async () => {
+      const slash = await httpRequest('GET', '/healthz/');
+      expect(slash.status).toBe(200);
+      expect(slash.data).toMatchObject({ status: 'ok' });
+      const head = await httpRequest('HEAD', '/healthz');
+      expect(head.status).toBe(200);
+    });
+
+    it('should return ok on /readyz', async () => {
+      const response = await httpRequest('GET', '/readyz');
+      expect(response.status).toBe(200);
+      expect(response.data).toMatchObject({ status: 'ok' });
     });
   });
 
