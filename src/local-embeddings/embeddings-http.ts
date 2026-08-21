@@ -75,13 +75,38 @@ export async function startEmbeddingsHttpServer(
 }
 
 function requestPath(req: http.IncomingMessage): string {
-  const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
-  return pathname.replace(/\/+$/, "") || "/";
+  const raw = req.url ?? "/";
+  let pathname = "/";
+  try {
+    pathname = new URL(raw, "http://127.0.0.1").pathname;
+  } catch {
+    pathname = raw.split("?")[0] || "/";
+  }
+  return (
+    pathname
+      .replace(/\\/g, "/")
+      .replace(/\/+/g, "/")
+      .replace(/\/+$/, "")
+      .toLowerCase() || "/"
+  );
 }
 
 function isRead(method: string | undefined): boolean {
   const m = (method ?? "").toUpperCase();
   return m === "GET" || m === "HEAD";
+}
+
+function isHealthPath(path: string): boolean {
+  return (
+    path === "/" ||
+    path === "/health" ||
+    path === "/healthz" ||
+    path === "/v1" ||
+    path === "/v1/health" ||
+    path === "/v1/healthz" ||
+    path.endsWith("/health") ||
+    path.endsWith("/healthz")
+  );
 }
 
 async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse) {
@@ -91,15 +116,10 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 
   const path = requestPath(req);
 
-  if (
-    isRead(req.method) &&
-    (path === "/" ||
-      path === "/healthz" ||
-      path === "/v1/healthz" ||
-      path === "/v1")
-  ) {
+  if (isRead(req.method) && isHealthPath(path)) {
     return sendJson(res, 200, {
       status: "ok",
+      sidecar: "local-embeddings-mcp",
       model: getDefaultModelId(),
       cacheDir: getCacheDir(),
       embeddings: "/v1/embeddings",
@@ -165,7 +185,13 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
   }
 
   return sendJson(res, 404, {
-    error: { message: "not found", type: "invalid_request_error" },
+    error: {
+      message: "not found",
+      type: "invalid_request_error",
+      method: req.method ?? "",
+      path,
+      rawUrl: req.url ?? "",
+    },
   });
 }
 

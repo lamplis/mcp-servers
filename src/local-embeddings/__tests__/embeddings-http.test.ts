@@ -57,9 +57,23 @@ describe("local-embeddings HTTP sidecar", () => {
     });
   }
 
+  it("returns ok on GET /health", async () => {
+    const handle = await start();
+    const res = await request(handle, "GET", "/health");
+    expect(res.status).toBe(200);
+    expect(res.data).toMatchObject({ status: "ok" });
+  });
+
   it("returns ok on GET /healthz", async () => {
     const handle = await start();
     const res = await request(handle, "GET", "/healthz");
+    expect(res.status).toBe(200);
+    expect(res.data).toMatchObject({ status: "ok", sidecar: "local-embeddings-mcp" });
+  });
+
+  it("collapses duplicate slashes on /healthz", async () => {
+    const handle = await start();
+    const res = await request(handle, "GET", "//healthz");
     expect(res.status).toBe(200);
     expect(res.data).toMatchObject({ status: "ok" });
   });

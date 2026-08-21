@@ -25,7 +25,7 @@ async function main() {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes("EADDRINUSE")) {
         console.error(
-          `[fake-qdrant] HTTP shim skipped: port ${config.httpPort} already in use. MCP tools remain available over stdio.`
+          `[fake-qdrant] HTTP shim skipped: port ${config.httpPort} already in use. MCP tools remain available over stdio. A stale process is still serving :${config.httpPort}; browser /healthz will hit that old process. Stop all node.exe, then reload the IDE.`
         );
       } else {
         console.error(`[fake-qdrant] HTTP shim failed to start: ${msg}. MCP tools remain available over stdio.`);

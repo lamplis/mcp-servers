@@ -74,13 +74,39 @@ export async function startQdrantHttpServer(
 }
 
 function requestPath(req: http.IncomingMessage): string {
-  const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
-  return pathname.replace(/\/+$/, "") || "/";
+  const raw = req.url ?? "/";
+  let pathname = "/";
+  try {
+    pathname = new URL(raw, "http://127.0.0.1").pathname;
+  } catch {
+    pathname = raw.split("?")[0] || "/";
+  }
+  return (
+    pathname
+      .replace(/\\/g, "/")
+      .replace(/\/+/g, "/")
+      .replace(/\/+$/, "")
+      .toLowerCase() || "/"
+  );
 }
 
 function isRead(method: string | undefined): boolean {
   const m = (method ?? "").toUpperCase();
   return m === "GET" || m === "HEAD";
+}
+
+function isHealthPath(path: string): boolean {
+  return (
+    path === "/" ||
+    path === "/health" ||
+    path === "/healthz" ||
+    path === "/readyz" ||
+    path === "/livez" ||
+    path.endsWith("/health") ||
+    path.endsWith("/healthz") ||
+    path.endsWith("/readyz") ||
+    path.endsWith("/livez")
+  );
 }
 
 async function handleRequest(
@@ -98,15 +124,10 @@ async function handleRequest(
     console.error(`[fake-qdrant] DELETE request: ${req.method} ${path}`);
   }
 
-  if (
-    isRead(req.method) &&
-    (path === "/" ||
-      path === "/healthz" ||
-      path === "/readyz" ||
-      path === "/livez")
-  ) {
+  if (isRead(req.method) && isHealthPath(path)) {
     return sendJson(res, 200, {
       status: "ok",
+      sidecar: "fake-qdrant-mcp",
       title: "qdrant - vector search engine",
       version: "1.12.0",
     });
@@ -383,7 +404,13 @@ async function handleRequest(
     }
   }
 
-  return sendJson(res, 404, { status: { error: "not found" } });
+  return sendJson(res, 404, {
+    status: { error: "not found" },
+    method: req.method ?? "",
+    path,
+    rawUrl: req.url ?? "",
+    sidecar: "fake-qdrant-mcp",
+  });
 }
 
 function sendJson(res: http.ServerResponse, status: number, payload: unknown) {

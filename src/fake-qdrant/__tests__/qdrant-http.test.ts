@@ -99,10 +99,13 @@ describe('Fake Qdrant HTTP API Integration Tests', () => {
       expect(response.data).toMatchObject({ status: 'ok' });
     });
 
-    it('should return ok status on /healthz endpoint', async () => {
-      const response = await httpRequest('GET', '/healthz');
-      expect(response.status).toBe(200);
-      expect(response.data).toMatchObject({ status: 'ok' });
+    it('should return ok status on /health and /healthz', async () => {
+      const health = await httpRequest('GET', '/health');
+      expect(health.status).toBe(200);
+      expect(health.data).toMatchObject({ status: 'ok' });
+      const healthz = await httpRequest('GET', '/healthz');
+      expect(healthz.status).toBe(200);
+      expect(healthz.data).toMatchObject({ status: 'ok' });
     });
 
     it('should accept HEAD and trailing slash on /healthz', async () => {

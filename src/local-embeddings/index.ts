@@ -15,7 +15,7 @@ async function main() {
       await startEmbeddingsHttpServer();
     } catch (error) {
       console.error(
-        "[local-embeddings] HTTP sidecar failed to start; stdio MCP is still available:",
+        "[local-embeddings] HTTP sidecar failed to start; stdio MCP is still available. If this is EADDRINUSE, a stale process still owns :3100 and browser /healthz hits that old process. Stop all node.exe, then reload the IDE:",
         error
       );
     }

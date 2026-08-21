@@ -211,11 +211,21 @@ Reload the window so MCP restarts, then open:
 - `http://127.0.0.1:3100/healthz`
 - `http://127.0.0.1:6333/healthz`
 
-Expect `"status":"ok"`. `GET /v1` and `GET /v1/models` on `:3100` are also valid. Do not test the RooCode base URL `http://127.0.0.1:3100/v1` as a health page on an old process.
+Expect `"status":"ok"` on `/`, `/health`, and `/healthz`. `GET /v1` and `GET /v1/models` on `:3100` are also valid.
 
 ### Port already in use (`EADDRINUSE` on 6333 or 3100)
 
-Stdio still works. Fake Qdrant will try to free its HTTP port. Local embeddings logs a warning and keeps stdio up if `:3100` is taken.
+Stdio still works. Fake Qdrant **does not steal the port**: if `:6333` or `:3100` is already bound, the new MCP process logs EADDRINUSE and skips the HTTP sidecar. The browser then still talks to the **old** process, which is why `/healthz` can keep returning 404 after a git pull.
+
+From an external PowerShell (IDE closed):
+
+```powershell
+Get-NetTCPConnection -LocalPort 3100,6333 -ErrorAction SilentlyContinue |
+  Select-Object LocalPort, OwningProcess, State
+Get-Process node -ErrorAction SilentlyContinue | Stop-Process -Force
+```
+
+Then reopen the IDE so MCP binds the ports again. A current sidecar health JSON includes `"sidecar":"local-embeddings-mcp"` or `"sidecar":"fake-qdrant-mcp"`. If that field is missing, you are still on the stale process.
 
 ### Docsearch not finding results
 
