@@ -51,6 +51,7 @@ Give local development a Qdrant-like collection and query surface that works on 
 8. **Optional embedding helper** - `provider.ts` can call a local or OpenAI-compatible HTTP embeddings API. MCP upsert still takes raw vectors; the helper is not the storage engine.
 9. **Daily file logs** - JSONL logs under `{dataDir}/logs/YYYY-MM-DD.log`, kept for 3 local days, so RooCode/VS Code HTTP and MCP failures can be reproduced from disk.
 10. **Single-writer robustness** - One in-process disk gate for all durable writes; per-collection mutation mutex; `{dataDir}/.write.lock` so a second process cannot rewrite the same JSONL. HTTP returns 503 when the lock is busy. Auto-compact after upsert storms. Not multi-tenant auth.
+11. **RooCode HTTP dialect** - Nested payload filters, payload index stubs, honest point counts, query `{ points }`, scroll/retrieve/count, keyword postings, JSONL tombstones, truncated `codeChunk` logs.
 
 ### Architecture Summary
 - In-memory `Map` per collection; cosine computed in JavaScript.
@@ -99,18 +100,31 @@ Give local development a Qdrant-like collection and query surface that works on 
 - **Output**: Success flag
 - **Use Case**: Flush dirty collections to compact JSONL files
 
+#### `fake_qdrant_delete_points`
+- **Input**: `collection`, optional `ids`, optional Qdrant `filter`
+- **Output**: Deleted count
+
+#### `fake_qdrant_collection_stats`
+- **Input**: optional `name`
+- **Output**: Points, JSONL lines, indexes, posting-list sizes
+
 ### HTTP Shim Endpoints
 
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET` | `/` or `/healthz` | Liveness |
-| `GET` | `/collections` | List collections |
+| `GET` | `/metrics` | Stats + lock busy |
+| `GET` | `/collections` | List collections with point counts |
 | `GET` | `/collections/{name}` | Collection metadata |
-| `PUT` | `/collections/{name}` | Create collection |
+| `PUT` | `/collections/{name}` | Create or no-op if same size (409 on mismatch) |
 | `DELETE` | `/collections/{name}` | Delete collection |
+| `PUT` | `/collections/{name}/index` | Payload keyword field name |
 | `PUT` | `/collections/{name}/points` | Upsert points |
-| `POST` | `/collections/{name}/points/query` | Vector search |
-| `POST` | `/collections/{name}/points/delete` | Delete by id or limited filter |
+| `POST` | `/collections/{name}/points` | Retrieve by ids |
+| `POST` | `/collections/{name}/points/query` | Vector search (`result.points`, optional filter) |
+| `POST` | `/collections/{name}/points/scroll` | Page points |
+| `POST` | `/collections/{name}/points/count` | Count points |
+| `POST` | `/collections/{name}/points/delete` | Delete by id or nested filter |
 | `POST` | `/collections/{name}/compact` | Rewrite unique JSONL snapshot |
 
 ## Use Cases and User Stories

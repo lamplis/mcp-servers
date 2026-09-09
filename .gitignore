@@ -329,3 +329,6 @@ data/docsearch/index/
 
 # Transformers.js weights (populate locally via prefetch_model)
 model-cache/
+
+# Workstation-only harnesses (never push)
+local/

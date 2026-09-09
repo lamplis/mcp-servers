@@ -11,17 +11,36 @@ import {
   lockDirForDataDir,
   type ProcessLock,
 } from "./disk-gate.js";
+import {
+  candidateIdsFromFilter,
+  matchFilter,
+  payloadFieldString,
+  type KeywordPostings,
+} from "./qdrant-filter.js";
 
 export type DistanceMetric = "Cosine";
 
 export interface CollectionMeta {
   size: number;
   distance: DistanceMetric;
+  indexes?: string[];
+  pointsCount?: number;
 }
 
 export interface CollectionInfo {
   name: string;
   vectors: CollectionMeta;
+  pointsCount: number;
+}
+
+export interface CollectionStats {
+  name: string;
+  size: number;
+  distance: DistanceMetric;
+  pointsCount: number;
+  jsonlLines: number;
+  indexes: string[];
+  postingListSizes: Record<string, number>;
 }
 
 export interface PointRecord {
@@ -30,9 +49,23 @@ export interface PointRecord {
   payload: unknown;
 }
 
+export interface QueryHit {
+  id: string | number;
+  score: number;
+  payload: unknown;
+}
+
 export interface QueryOptions {
   limit?: number;
   scoreThreshold?: number;
+  filter?: unknown;
+}
+
+export interface ScrollOptions {
+  limit?: number;
+  offset?: number;
+  filter?: unknown;
+  withPayload?: boolean;
 }
 
 export interface StoreOptions {
@@ -42,6 +75,20 @@ export interface StoreOptions {
   acquireLock?: boolean;
   lockRetries?: number;
   lockRetryMs?: number;
+}
+
+export class CollectionSizeMismatchError extends Error {
+  readonly existingSize: number;
+  readonly requestedSize: number;
+
+  constructor(name: string, existingSize: number, requestedSize: number) {
+    super(
+      `Collection ${name} exists with size ${existingSize}, requested ${requestedSize}`
+    );
+    this.name = "CollectionSizeMismatchError";
+    this.existingSize = existingSize;
+    this.requestedSize = requestedSize;
+  }
 }
 
 export const AUTO_COMPACT_MULTIPLIER = 2;
@@ -63,6 +110,7 @@ interface LoadedCollection {
   name: string;
   meta: CollectionMeta;
   points: Map<string, PointRecord>;
+  postings: KeywordPostings;
   dirty: boolean;
   jsonlLines: number;
 }
@@ -174,6 +222,110 @@ export class Store {
     }
   }
 
+  private parseIndexes(raw: unknown): string[] {
+    if (!Array.isArray(raw)) {
+      return [];
+    }
+    return raw.filter((item): item is string => typeof item === "string" && item.length > 0);
+  }
+
+  private rebuildPostings(loaded: LoadedCollection): void {
+    loaded.postings = new Map();
+    for (const point of loaded.points.values()) {
+      this.indexPoint(loaded, point);
+    }
+  }
+
+  private indexPoint(loaded: LoadedCollection, point: PointRecord): void {
+    const fields = loaded.meta.indexes ?? [];
+    const id = String(point.id);
+    for (const field of fields) {
+      const value = payloadFieldString(point.payload, field);
+      if (value === undefined) {
+        continue;
+      }
+      let byValue = loaded.postings.get(field);
+      if (!byValue) {
+        byValue = new Map();
+        loaded.postings.set(field, byValue);
+      }
+      let ids = byValue.get(value);
+      if (!ids) {
+        ids = new Set();
+        byValue.set(value, ids);
+      }
+      ids.add(id);
+    }
+  }
+
+  private unindexPoint(loaded: LoadedCollection, point: PointRecord): void {
+    const fields = loaded.meta.indexes ?? [];
+    const id = String(point.id);
+    for (const field of fields) {
+      const value = payloadFieldString(point.payload, field);
+      if (value === undefined) {
+        continue;
+      }
+      const byValue = loaded.postings.get(field);
+      const ids = byValue?.get(value);
+      if (!ids) {
+        continue;
+      }
+      ids.delete(id);
+      if (ids.size === 0) {
+        byValue?.delete(value);
+      }
+    }
+  }
+
+  private postingListSizes(loaded: LoadedCollection): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const [field, byValue] of loaded.postings) {
+      let count = 0;
+      for (const ids of byValue.values()) {
+        count += ids.size;
+      }
+      out[field] = count;
+    }
+    return out;
+  }
+
+  private toInfo(loaded: LoadedCollection): CollectionInfo {
+    return {
+      name: loaded.name,
+      vectors: { ...loaded.meta },
+      pointsCount: loaded.points.size,
+    };
+  }
+
+  private async readMetaFile(name: string): Promise<CollectionMeta | null> {
+    try {
+      const raw = await fs.readFile(this.metaPath(name), "utf8");
+      const parsed = JSON.parse(raw) as {
+        size?: unknown;
+        distance?: unknown;
+        indexes?: unknown;
+        pointsCount?: unknown;
+      };
+      const size = Number(parsed.size);
+      if (!Number.isInteger(size) || size <= 0) {
+        return null;
+      }
+      const distance = normalizeDistance(
+        typeof parsed.distance === "string" ? parsed.distance : undefined
+      );
+      const pointsCount = Number(parsed.pointsCount);
+      return {
+        size,
+        distance,
+        indexes: this.parseIndexes(parsed.indexes),
+        pointsCount: Number.isInteger(pointsCount) && pointsCount >= 0 ? pointsCount : 0,
+      };
+    } catch {
+      return null;
+    }
+  }
+
   private async loadCollectionUnlocked(
     name: string
   ): Promise<LoadedCollection | null> {
@@ -182,29 +334,10 @@ export class Store {
       return cached;
     }
 
-    const metaFile = this.metaPath(name);
-    let metaRaw: string;
-    try {
-      metaRaw = await fs.readFile(metaFile, "utf8");
-    } catch {
+    const meta = await this.readMetaFile(name);
+    if (!meta) {
       return null;
     }
-
-    let parsed: { size?: unknown; distance?: unknown };
-    try {
-      parsed = JSON.parse(metaRaw) as { size?: unknown; distance?: unknown };
-    } catch {
-      return null;
-    }
-
-    const size = Number(parsed.size);
-    if (!Number.isInteger(size) || size <= 0) {
-      return null;
-    }
-
-    const distance = normalizeDistance(
-      typeof parsed.distance === "string" ? parsed.distance : undefined
-    );
 
     const points = new Map<string, PointRecord>();
     let jsonlLines = 0;
@@ -216,11 +349,22 @@ export class Store {
         }
         jsonlLines += 1;
         try {
-          const record = JSON.parse(line) as PointRecord;
+          const record = JSON.parse(line) as PointRecord & {
+            op?: string;
+            id?: unknown;
+          };
+          if (record.op === "delete" && isValidPointId(record.id)) {
+            points.delete(String(record.id));
+            continue;
+          }
           if (!isValidPointId(record.id) || !Array.isArray(record.vector)) {
             continue;
           }
-          points.set(String(record.id), record);
+          points.set(String(record.id), {
+            id: record.id,
+            vector: record.vector,
+            payload: record.payload,
+          });
         } catch {
           // Skip malformed lines
         }
@@ -231,11 +375,13 @@ export class Store {
 
     const loaded: LoadedCollection = {
       name,
-      meta: { size, distance },
+      meta: { ...meta, pointsCount: points.size },
       points,
+      postings: new Map(),
       dirty: false,
       jsonlLines,
     };
+    this.rebuildPostings(loaded);
     this.collections.set(name, loaded);
     return loaded;
   }
@@ -250,18 +396,26 @@ export class Store {
     });
   }
 
+  private async persistMetaCounts(loaded: LoadedCollection): Promise<void> {
+    loaded.meta.pointsCount = loaded.points.size;
+    await this.writeMeta(loaded.name, loaded.meta);
+  }
+
   private async rewritePoints(loaded: LoadedCollection): Promise<void> {
     await this.diskGate.run(async () => {
       await fs.mkdir(this.collectionDir(loaded.name), { recursive: true });
       const lines: string[] = [];
       for (const point of loaded.points.values()) {
-        lines.push(JSON.stringify(point));
+        lines.push(JSON.stringify({ id: point.id, vector: point.vector, payload: point.payload }));
       }
       const body = lines.length > 0 ? `${lines.join("\n")}\n` : "";
       await atomicWriteFile(this.pointsPath(loaded.name), body);
     });
     loaded.jsonlLines = loaded.points.size;
     loaded.dirty = false;
+    loaded.meta.pointsCount = loaded.points.size;
+    this.rebuildPostings(loaded);
+    await this.writeMeta(loaded.name, loaded.meta);
   }
 
   private async appendPoints(
@@ -272,6 +426,22 @@ export class Store {
     if (!payload) {
       return;
     }
+    await this.diskGate.run(async () => {
+      await fs.mkdir(this.collectionDir(name), { recursive: true });
+      await fs.appendFile(this.pointsPath(name), `${payload}\n`, "utf8");
+    });
+  }
+
+  private async appendTombstones(
+    name: string,
+    ids: string[]
+  ): Promise<void> {
+    if (ids.length === 0) {
+      return;
+    }
+    const payload = ids
+      .map((id) => JSON.stringify({ op: "delete", id }))
+      .join("\n");
     await this.diskGate.run(async () => {
       await fs.mkdir(this.collectionDir(name), { recursive: true });
       await fs.appendFile(this.pointsPath(name), `${payload}\n`, "utf8");
@@ -302,10 +472,20 @@ export class Store {
       if (!entry.isDirectory() || entry.name.startsWith(".")) {
         continue;
       }
-      const info = await this.getCollection(entry.name);
-      if (info) {
-        result.push(info);
+      const cached = this.collections.get(entry.name);
+      if (cached) {
+        result.push(this.toInfo(cached));
+        continue;
       }
+      const meta = await this.readMetaFile(entry.name);
+      if (!meta) {
+        continue;
+      }
+      result.push({
+        name: entry.name,
+        vectors: meta,
+        pointsCount: meta.pointsCount ?? 0,
+      });
     }
     return result;
   }
@@ -317,11 +497,37 @@ export class Store {
       if (!loaded) {
         return null;
       }
-      return {
-        name,
-        vectors: { ...loaded.meta },
-      };
+      return this.toInfo(loaded);
     });
+  }
+
+  async getCollectionStats(name?: string): Promise<CollectionStats[]> {
+    this.assertWritable();
+    const names = name
+      ? [name]
+      : (await this.listCollections()).map((item) => item.name);
+    const stats: CollectionStats[] = [];
+    for (const collectionName of names) {
+      const item = await this.mutexFor(collectionName).run(async () => {
+        const loaded = await this.loadCollectionUnlocked(collectionName);
+        if (!loaded) {
+          return null;
+        }
+        return {
+          name: loaded.name,
+          size: loaded.meta.size,
+          distance: loaded.meta.distance,
+          pointsCount: loaded.points.size,
+          jsonlLines: loaded.jsonlLines,
+          indexes: [...(loaded.meta.indexes ?? [])],
+          postingListSizes: this.postingListSizes(loaded),
+        } satisfies CollectionStats;
+      });
+      if (item) {
+        stats.push(item);
+      }
+    }
+    return stats;
   }
 
   async createCollection(
@@ -340,8 +546,9 @@ export class Store {
 
       const loaded: LoadedCollection = {
         name,
-        meta: { size, distance },
+        meta: { size, distance, indexes: [], pointsCount: 0 },
         points: new Map(),
+        postings: new Map(),
         dirty: false,
         jsonlLines: 0,
       };
@@ -351,7 +558,62 @@ export class Store {
         await atomicWriteFile(this.pointsPath(name), "");
       });
 
-      return { name, vectors: { size, distance } };
+      return this.toInfo(loaded);
+    });
+  }
+
+  async ensureCollection(
+    name: string,
+    meta: { size: number; distance?: string }
+  ): Promise<{ created: boolean; info: CollectionInfo }> {
+    this.assertWritable();
+    const size = meta.size;
+    if (!Number.isInteger(size) || size <= 0) {
+      throw new Error("Collection size must be a positive integer");
+    }
+    const distance = normalizeDistance(meta.distance);
+    return this.mutexFor(name).run(async () => {
+      const existing = await this.loadCollectionUnlocked(name);
+      if (existing) {
+        if (existing.meta.size !== size) {
+          throw new CollectionSizeMismatchError(name, existing.meta.size, size);
+        }
+        return { created: false, info: this.toInfo(existing) };
+      }
+      const loaded: LoadedCollection = {
+        name,
+        meta: { size, distance, indexes: [], pointsCount: 0 },
+        points: new Map(),
+        postings: new Map(),
+        dirty: false,
+        jsonlLines: 0,
+      };
+      this.collections.set(name, loaded);
+      await this.writeMeta(name, loaded.meta);
+      await this.diskGate.run(async () => {
+        await atomicWriteFile(this.pointsPath(name), "");
+      });
+      return { created: true, info: this.toInfo(loaded) };
+    });
+  }
+
+  async ensurePayloadIndex(name: string, fieldName: string): Promise<boolean | null> {
+    this.assertWritable();
+    if (!fieldName || typeof fieldName !== "string") {
+      throw new Error("field_name is required");
+    }
+    return this.mutexFor(name).run(async () => {
+      const loaded = await this.loadCollectionUnlocked(name);
+      if (!loaded) {
+        return null;
+      }
+      const indexes = loaded.meta.indexes ?? [];
+      if (!indexes.includes(fieldName)) {
+        loaded.meta.indexes = [...indexes, fieldName];
+        this.rebuildPostings(loaded);
+        await this.writeMeta(name, loaded.meta);
+      }
+      return true;
     });
   }
 
@@ -379,12 +641,13 @@ export class Store {
   }
 
   /**
-   * Delete points from a collection by IDs or by filter.
+   * Delete points from a collection by IDs and/or a Qdrant payload filter.
    */
   async deletePoints(
     name: string,
     pointIds?: (string | number)[],
-    filter?: (payload: unknown) => boolean
+    filterFn?: (payload: unknown) => boolean,
+    filterAst?: unknown
   ): Promise<number> {
     this.assertWritable();
     return this.mutexFor(name).run(async () => {
@@ -399,27 +662,50 @@ export class Store {
           toDelete.add(String(id));
         }
       }
-      if (filter) {
-        for (const [key, point] of loaded.points) {
-          if (filter(point.payload ?? null)) {
-            toDelete.add(key);
+      if (filterFn) {
+        const candidates =
+          filterAst !== undefined
+            ? candidateIdsFromFilter(filterAst, loaded.postings)
+            : null;
+        if (candidates) {
+          for (const key of candidates) {
+            const point = loaded.points.get(key);
+            if (point && filterFn(point.payload ?? null)) {
+              toDelete.add(key);
+            }
+          }
+        } else {
+          for (const [key, point] of loaded.points) {
+            if (filterFn(point.payload ?? null)) {
+              toDelete.add(key);
+            }
           }
         }
       }
 
-      let deletedCount = 0;
+      const deletedIds: string[] = [];
       for (const key of toDelete) {
-        if (loaded.points.delete(key)) {
-          deletedCount += 1;
+        const existing = loaded.points.get(key);
+        if (!existing) {
+          continue;
+        }
+        this.unindexPoint(loaded, existing);
+        loaded.points.delete(key);
+        deletedIds.push(key);
+      }
+
+      if (deletedIds.length > 0) {
+        loaded.dirty = true;
+        await this.appendTombstones(name, deletedIds);
+        loaded.jsonlLines += deletedIds.length;
+        loaded.meta.pointsCount = loaded.points.size;
+        await this.persistMetaCounts(loaded);
+        if (this.shouldAutoCompact(loaded)) {
+          await this.rewritePoints(loaded);
         }
       }
 
-      if (deletedCount > 0) {
-        loaded.dirty = true;
-        await this.rewritePoints(loaded);
-      }
-
-      return deletedCount;
+      return deletedIds.length;
     });
   }
 
@@ -448,22 +734,35 @@ export class Store {
       }
 
       for (const point of points) {
-        loaded.points.set(String(point.id), {
+        const key = String(point.id);
+        const previous = loaded.points.get(key);
+        if (previous) {
+          this.unindexPoint(loaded, previous);
+        }
+        const record: PointRecord = {
           id: point.id,
           vector: point.vector,
           payload: point.payload,
-        });
+        };
+        loaded.points.set(key, record);
+        this.indexPoint(loaded, record);
       }
       loaded.dirty = true;
       await this.appendPoints(name, points);
       loaded.jsonlLines += points.length;
+      loaded.meta.pointsCount = loaded.points.size;
+      await this.persistMetaCounts(loaded);
       if (this.shouldAutoCompact(loaded)) {
         await this.rewritePoints(loaded);
       }
     });
   }
 
-  async query(name: string, queryVector: number[], options: QueryOptions = {}) {
+  async query(
+    name: string,
+    queryVector: number[],
+    options: QueryOptions = {}
+  ): Promise<QueryHit[]> {
     this.assertWritable();
     const snapshot = await this.mutexFor(name).run(async () => {
       const loaded = await this.loadCollectionUnlocked(name);
@@ -482,16 +781,23 @@ export class Store {
         );
       }
 
-      return {
-        dimension,
-        points: [...loaded.points.values()],
-      };
+      let points = [...loaded.points.values()];
+      if (options.filter !== undefined) {
+        const candidates = candidateIdsFromFilter(options.filter, loaded.postings);
+        if (candidates) {
+          points = [...candidates]
+            .map((id) => loaded.points.get(id))
+            .filter((point): point is PointRecord => Boolean(point));
+        }
+        points = points.filter((point) => matchFilter(point.payload ?? null, options.filter));
+      }
+
+      return { points };
     });
 
     const limit = Math.max(1, options.limit ?? 20);
     const scoreThreshold = options.scoreThreshold ?? 0;
-    const scored: Array<{ id: string | number; score: number; payload: unknown }> =
-      [];
+    const scored: QueryHit[] = [];
 
     for (let i = 0; i < snapshot.points.length; i += 1) {
       if (i > 0 && i % QUERY_YIELD_EVERY === 0) {
@@ -510,6 +816,85 @@ export class Store {
 
     scored.sort((a, b) => b.score - a.score);
     return scored.slice(0, limit);
+  }
+
+  async scroll(
+    name: string,
+    options: ScrollOptions = {}
+  ): Promise<{ points: PointRecord[]; nextOffset: number | null }> {
+    this.assertWritable();
+    return this.mutexFor(name).run(async () => {
+      const loaded = await this.loadCollectionUnlocked(name);
+      if (!loaded) {
+        throw new Error(`Collection not found: ${name}`);
+      }
+      const withPayload = options.withPayload !== false;
+      let points = [...loaded.points.values()];
+      if (options.filter !== undefined) {
+        points = points.filter((point) =>
+          matchFilter(point.payload ?? null, options.filter)
+        );
+      }
+      const offset = Math.max(0, options.offset ?? 0);
+      const limit = Math.max(1, options.limit ?? 20);
+      const slice = points.slice(offset, offset + limit);
+      const nextOffset = offset + slice.length < points.length ? offset + slice.length : null;
+      return {
+        points: slice.map((point) => ({
+          id: point.id,
+          vector: point.vector,
+          payload: withPayload ? point.payload ?? null : null,
+        })),
+        nextOffset,
+      };
+    });
+  }
+
+  async retrieve(
+    name: string,
+    ids: (string | number)[],
+    withPayload = true
+  ): Promise<PointRecord[]> {
+    this.assertWritable();
+    return this.mutexFor(name).run(async () => {
+      const loaded = await this.loadCollectionUnlocked(name);
+      if (!loaded) {
+        throw new Error(`Collection not found: ${name}`);
+      }
+      const result: PointRecord[] = [];
+      for (const id of ids) {
+        const point = loaded.points.get(String(id));
+        if (!point) {
+          continue;
+        }
+        result.push({
+          id: point.id,
+          vector: point.vector,
+          payload: withPayload ? point.payload ?? null : null,
+        });
+      }
+      return result;
+    });
+  }
+
+  async countPoints(name: string, filter?: unknown): Promise<number> {
+    this.assertWritable();
+    return this.mutexFor(name).run(async () => {
+      const loaded = await this.loadCollectionUnlocked(name);
+      if (!loaded) {
+        throw new Error(`Collection not found: ${name}`);
+      }
+      if (filter === undefined) {
+        return loaded.points.size;
+      }
+      let count = 0;
+      for (const point of loaded.points.values()) {
+        if (matchFilter(point.payload ?? null, filter)) {
+          count += 1;
+        }
+      }
+      return count;
+    });
   }
 
   /**

@@ -1,8 +1,10 @@
+import crypto from "node:crypto";
 import http from "node:http";
 import { URL } from "node:url";
-import { Store } from "./store.js";
+import { CollectionSizeMismatchError, Store } from "./store.js";
 import { toLogger, type Logger } from "./logger.js";
 import { ProcessLockBusyError } from "./disk-gate.js";
+import { matchFilter } from "./qdrant-filter.js";
 
 export interface QdrantHttpServerOptions {
   store: Store;
@@ -30,6 +32,9 @@ export interface QdrantHttpServerHandle {
   close: () => Promise<void>;
 }
 
+const DELETE_DEDUP_TTL_MS = 60_000;
+export const CODE_CHUNK_LOG_CHARS = 200;
+
 export async function startQdrantHttpServer(
   options: QdrantHttpServerOptions
 ): Promise<QdrantHttpServerHandle> {
@@ -40,6 +45,7 @@ export async function startQdrantHttpServer(
   const host = options.host ?? process.env.FAKE_QDRANT_HTTP_HOST ?? "127.0.0.1";
   const port = options.port ?? Number(process.env.FAKE_QDRANT_HTTP_PORT ?? 6333);
   const logger = toLogger(options.logger);
+  const deleteDedup = new Map<string, number>();
 
   const server = http.createServer(async (req, res) => {
     const started = Date.now();
@@ -53,10 +59,10 @@ export async function startQdrantHttpServer(
       health: isRead(req.method) && isHealthPath(path),
     };
     try {
-      await handleRequest(req, res, options.store, requestLog);
+      await handleRequest(req, res, options.store, requestLog, logger, deleteDedup);
     } catch (error) {
       if (error instanceof ProcessLockBusyError) {
-        options.store && logger.error("store.busy", {
+        logger.error("store.busy", {
           holderPid: error.holderPid,
           message: error.message,
         });
@@ -85,6 +91,7 @@ export async function startQdrantHttpServer(
         );
       }
     }
+    requestLog.reqBody = summarizeHttpBody(requestLog.reqBody);
     emitHttpLog(logger, requestLog, Date.now() - started);
   });
 
@@ -96,10 +103,9 @@ export async function startQdrantHttpServer(
     });
   });
 
-  // Get the actual port (important when port 0 is used for dynamic assignment)
   const address = server.address();
   const actualPort = typeof address === "object" && address ? address.port : port;
-  
+
   logger.info("http.listen", { host, port: actualPort });
 
   return {
@@ -117,6 +123,34 @@ export async function startQdrantHttpServer(
         });
       }),
   };
+}
+
+export function summarizeHttpBody(value: unknown): unknown {
+  return summarizeValue(value);
+}
+
+function summarizeValue(value: unknown, key?: string): unknown {
+  if (typeof value === "string" && key === "codeChunk") {
+    if (value.length <= CODE_CHUNK_LOG_CHARS) {
+      return value;
+    }
+    return {
+      truncated: true,
+      length: value.length,
+      preview: value.slice(0, CODE_CHUNK_LOG_CHARS),
+    };
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => summarizeValue(item));
+  }
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [childKey, nested] of Object.entries(value as Record<string, unknown>)) {
+      out[childKey] = summarizeValue(nested, childKey);
+    }
+    return out;
+  }
+  return value;
 }
 
 function requestPath(req: http.IncomingMessage): string {
@@ -190,11 +224,28 @@ function isHealthPath(path: string): boolean {
   );
 }
 
+function filterDedupKey(collectionName: string, filter: unknown): string {
+  return crypto
+    .createHash("sha256")
+    .update(`${collectionName}\0${JSON.stringify(filter)}`)
+    .digest("hex");
+}
+
+function pruneDedup(map: Map<string, number>, now: number): void {
+  for (const [key, seen] of map) {
+    if (now - seen >= DELETE_DEDUP_TTL_MS) {
+      map.delete(key);
+    }
+  }
+}
+
 async function handleRequest(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   store: Store,
-  requestLog: HttpRequestLog
+  requestLog: HttpRequestLog,
+  logger: Logger,
+  deleteDedup: Map<string, number>
 ) {
   const json = (status: number, payload: unknown) =>
     sendJson(res, status, payload, requestLog);
@@ -219,13 +270,27 @@ async function handleRequest(
     });
   }
 
+  if (isRead(req.method) && path === "/metrics") {
+    const collections = await store.getCollectionStats();
+    return json(200, {
+      result: {
+        busy: store.isBusy,
+        collections,
+      },
+      status: "ok",
+      time: 0,
+    });
+  }
+
   if (isRead(req.method) && path === "/collections") {
     const collections = await store.listCollections();
     return json(200, {
       result: {
         collections: collections.map((collection) => ({
           name: collection.name,
-          vectors_count: 0,
+          points_count: collection.pointsCount,
+          indexed_vectors_count: collection.pointsCount,
+          vectors_count: collection.pointsCount,
           status: "green",
           config: {
             params: {
@@ -259,6 +324,8 @@ async function handleRequest(
     return json(200, {
       result: {
         ...collection,
+        points_count: collection.pointsCount,
+        indexed_vectors_count: collection.pointsCount,
         status: "green",
       },
       status: "ok",
@@ -283,10 +350,15 @@ async function handleRequest(
     }
 
     try {
-      await store.createCollection(collectionName, { size, distance });
+      await store.ensureCollection(collectionName, { size, distance });
       return json(200, { result: true, status: "ok", time: 0 });
     } catch (error) {
       rethrowIfBusy(error);
+      if (error instanceof CollectionSizeMismatchError) {
+        return json(409, {
+          status: { error: error.message },
+        });
+      }
       return json(400, {
         status: { error: error instanceof Error ? error.message : String(error) },
       });
@@ -296,6 +368,26 @@ async function handleRequest(
   if (req.method === "DELETE" && remainder === "") {
     await store.deleteCollection(collectionName);
     return json(200, { result: true, status: "ok", time: 0 });
+  }
+
+  if (req.method === "PUT" && remainder === "/index") {
+    const body = requestLog.reqBody as any;
+    const fieldName = body?.field_name ?? body?.fieldName;
+    if (typeof fieldName !== "string" || !fieldName) {
+      return json(400, { status: { error: "missing field_name" } });
+    }
+    try {
+      const ok = await store.ensurePayloadIndex(collectionName, fieldName);
+      if (ok == null) {
+        return json(404, { status: { error: "collection not found" } });
+      }
+      return json(200, { result: true, status: "ok", time: 0 });
+    } catch (error) {
+      rethrowIfBusy(error);
+      return json(400, {
+        status: { error: error instanceof Error ? error.message : String(error) },
+      });
+    }
   }
 
   if (req.method === "PUT" && remainder === "/points") {
@@ -337,6 +429,31 @@ async function handleRequest(
     }
   }
 
+  if (req.method === "POST" && remainder === "/points") {
+    const body = requestLog.reqBody as any;
+    const ids = Array.isArray(body?.ids) ? body.ids : null;
+    if (!ids) {
+      return json(400, { status: { error: "missing ids[]" } });
+    }
+    try {
+      const points = await store.retrieve(
+        collectionName,
+        ids,
+        body?.with_payload !== false
+      );
+      return json(200, {
+        result: { points },
+        status: "ok",
+        time: 0,
+      });
+    } catch (error) {
+      rethrowIfBusy(error);
+      return json(400, {
+        status: { error: error instanceof Error ? error.message : String(error) },
+      });
+    }
+  }
+
   if (req.method === "POST" && remainder === "/points/query") {
     const body = requestLog.reqBody as any;
     const vector =
@@ -354,11 +471,54 @@ async function handleRequest(
     }
 
     try {
-      const results = await store.query(collectionName, vector, {
+      const points = await store.query(collectionName, vector, {
         limit: Number.isFinite(limit) ? limit : 20,
         scoreThreshold: Number.isFinite(scoreThreshold) ? scoreThreshold : 0,
+        filter: body?.filter,
       });
-      return json(200, { result: results, status: "ok", time: 0 });
+      return json(200, { result: { points }, status: "ok", time: 0 });
+    } catch (error) {
+      rethrowIfBusy(error);
+      return json(400, {
+        status: { error: error instanceof Error ? error.message : String(error) },
+      });
+    }
+  }
+
+  if (req.method === "POST" && remainder === "/points/scroll") {
+    const body = requestLog.reqBody as any;
+    try {
+      const result = await store.scroll(collectionName, {
+        limit: Number(body?.limit ?? 20),
+        offset: Number(body?.offset ?? 0),
+        filter: body?.filter,
+        withPayload: body?.with_payload !== false,
+      });
+      return json(200, {
+        result: {
+          points: result.points,
+          next_page_offset: result.nextOffset,
+        },
+        status: "ok",
+        time: 0,
+      });
+    } catch (error) {
+      rethrowIfBusy(error);
+      return json(400, {
+        status: { error: error instanceof Error ? error.message : String(error) },
+      });
+    }
+  }
+
+  if (req.method === "POST" && remainder === "/points/count") {
+    const body = requestLog.reqBody as any;
+    try {
+      const count = await store.countPoints(collectionName, body?.filter);
+      return json(200, {
+        result: { count },
+        status: "ok",
+        time: 0,
+      });
     } catch (error) {
       rethrowIfBusy(error);
       return json(400, {
@@ -372,13 +532,10 @@ async function handleRequest(
     const pointIds = body?.points;
     const filter = body?.filter;
 
-    // Check if collection exists first - if not, return success with 0 deleted
-    // This makes the API more forgiving for clients that try to clean up
-    // points before collections are created (e.g., RooCode's QdrantVectorStore)
     const collection = await store.getCollection(collectionName);
     if (!collection) {
       return json(200, {
-        result: { operation_id: 0, status: "completed" },
+        result: { operation_id: 0, status: "completed", deleted: 0 },
         status: "ok",
         time: 0,
       });
@@ -388,85 +545,44 @@ async function handleRequest(
       let deletedCount = 0;
 
       if (Array.isArray(pointIds) && pointIds.length > 0) {
-        // Delete by point IDs
         deletedCount = await store.deletePoints(collectionName, pointIds);
       } else if (filter) {
-        // Delete by filter (e.g., file path in payload)
-        // Support Qdrant filter format: { must: [{ key: "path", match: { value: "..." } }] }
-        const filterFn = (payload: unknown): boolean => {
-          if (!payload || typeof payload !== "object") {
-            return false;
-          }
-          const p = payload as Record<string, unknown>;
-          
-          // Helper to get nested value by key path
-          const getNestedValue = (obj: unknown, keyPath: string): unknown => {
-            const keys = keyPath.split(".");
-            let value: unknown = obj;
-            for (const key of keys) {
-              if (value && typeof value === "object" && key in value) {
-                value = (value as Record<string, unknown>)[key];
-              } else {
-                return undefined;
-              }
-            }
-            return value;
-          };
-          
-          // Support filter.must (all conditions must match)
-          if (Array.isArray(filter.must)) {
-            for (const condition of filter.must) {
-              if (condition.key && condition.match) {
-                const value = getNestedValue(p, condition.key);
-                if (value === undefined) {
-                  return false; // Key path doesn't exist
-                }
-                // Match value
-                if (condition.match.value !== undefined) {
-                  const matchValue = condition.match.value;
-                  if (String(value) !== String(matchValue)) {
-                    return false; // Value doesn't match
-                  }
-                }
-              }
-            }
-            return true; // All must conditions passed
-          }
-          
-          // Support filter.should (at least one condition must match)
-          if (Array.isArray(filter.should)) {
-            for (const condition of filter.should) {
-              if (condition.key && condition.match) {
-                const value = getNestedValue(p, condition.key);
-                if (value !== undefined && condition.match.value !== undefined) {
-                  if (String(value) === String(condition.match.value)) {
-                    return true; // At least one should condition passed
-                  }
-                }
-              }
-            }
-            return false; // No should conditions matched
-          }
-          
-          // Support direct key-value matching (legacy format)
-          if (filter.key && filter.match) {
-            const value = getNestedValue(p, filter.key);
-            if (value !== undefined && filter.match.value !== undefined) {
-              return String(value) === String(filter.match.value);
-            }
-          }
-          
-          return false;
-        };
-        deletedCount = await store.deletePoints(collectionName, undefined, filterFn);
+        const now = Date.now();
+        pruneDedup(deleteDedup, now);
+        const key = filterDedupKey(collectionName, filter);
+        const seen = deleteDedup.get(key);
+        if (seen !== undefined && now - seen < DELETE_DEDUP_TTL_MS) {
+          logger.info("http.delete_dedup", {
+            collection: collectionName,
+            ageMs: now - seen,
+          });
+          return json(200, {
+            result: { operation_id: 0, status: "completed", deleted: 0, dedup: true },
+            status: "ok",
+            time: 0,
+          });
+        }
+        deleteDedup.set(key, now);
+        deletedCount = await store.deletePoints(
+          collectionName,
+          undefined,
+          (payload) => matchFilter(payload, filter),
+          filter
+        );
       } else {
         return json(400, {
           status: { error: "missing points[] or filter" },
         });
       }
 
+      logger.info("http.delete", {
+        collection: collectionName,
+        deletedCount,
+        byFilter: Boolean(filter),
+      });
+
       return json(200, {
-        result: { operation_id: 0, status: "completed" },
+        result: { operation_id: 0, status: "completed", deleted: deletedCount },
         status: "ok",
         time: 0,
       });
@@ -478,7 +594,6 @@ async function handleRequest(
     }
   }
 
-  // Non-standard: POST /collections/<name>/compact (rewrite unique JSONL snapshot)
   if (req.method === "POST" && remainder === "/compact") {
     try {
       const count = await store.compactCollection(collectionName);
@@ -549,4 +664,3 @@ function readJsonBody(req: http.IncomingMessage): Promise<any> {
     req.on("error", reject);
   });
 }
-

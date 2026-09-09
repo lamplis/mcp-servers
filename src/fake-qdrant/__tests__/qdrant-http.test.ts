@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import http from 'http';
 import { Store } from '../store.js';
-import { startQdrantHttpServer, QdrantHttpServerHandle } from '../qdrant-http.js';
+import { startQdrantHttpServer, QdrantHttpServerHandle, summarizeHttpBody } from '../qdrant-http.js';
 import { resolveDataDir } from '../store.js';
 import { acquireProcessLock, lockDirForDataDir } from '../disk-gate.js';
 import fs from 'fs/promises';
@@ -91,6 +91,16 @@ describe('Fake Qdrant HTTP API Integration Tests', () => {
       }
       req.end();
     });
+  }
+
+  function queryHits(data: any): Array<{ id: unknown; score?: number; payload?: unknown }> {
+    if (Array.isArray(data?.result?.points)) {
+      return data.result.points;
+    }
+    if (Array.isArray(data?.result)) {
+      return data.result;
+    }
+    return [];
   }
 
   describe('Health Check', () => {
@@ -368,10 +378,10 @@ describe('Fake Qdrant HTTP API Integration Tests', () => {
       expect(response.data).toMatchObject({
         status: 'ok',
       });
-      expect(Array.isArray(response.data.result)).toBe(true);
-      expect(response.data.result.length).toBeGreaterThan(0);
-      expect(response.data.result[0]).toHaveProperty('id');
-      expect(response.data.result[0]).toHaveProperty('score');
+      const hits = queryHits(response.data);
+      expect(hits.length).toBeGreaterThan(0);
+      expect(hits[0]).toHaveProperty('id');
+      expect(hits[0]).toHaveProperty('score');
     });
 
     it('should query points with query.vector format', async () => {
@@ -383,7 +393,7 @@ describe('Fake Qdrant HTTP API Integration Tests', () => {
       });
       expect(response.status).toBe(200);
       expect(response.data.status).toBe('ok');
-      expect(Array.isArray(response.data.result)).toBe(true);
+      expect(Array.isArray(queryHits(response.data))).toBe(true);
     });
 
     it('should respect limit parameter', async () => {
@@ -392,7 +402,7 @@ describe('Fake Qdrant HTTP API Integration Tests', () => {
         limit: 1,
       });
       expect(response.status).toBe(200);
-      expect(response.data.result.length).toBeLessThanOrEqual(1);
+      expect(queryHits(response.data).length).toBeLessThanOrEqual(1);
     });
 
     it('should respect score_threshold parameter', async () => {
@@ -402,8 +412,9 @@ describe('Fake Qdrant HTTP API Integration Tests', () => {
         score_threshold: 0.9,
       });
       expect(response.status).toBe(200);
-      if (response.data.result.length > 0) {
-        expect(response.data.result[0].score).toBeGreaterThanOrEqual(0.9);
+      const hits = queryHits(response.data);
+      if (hits.length > 0) {
+        expect(hits[0].score).toBeGreaterThanOrEqual(0.9);
       }
     });
 
@@ -428,7 +439,7 @@ describe('Fake Qdrant HTTP API Integration Tests', () => {
         limit: 10,
       });
       expect(response.status).toBe(200);
-      expect(response.data.result).toEqual([]);
+      expect(queryHits(response.data)).toEqual([]);
     });
   });
 
@@ -476,7 +487,7 @@ describe('Fake Qdrant HTTP API Integration Tests', () => {
         vector: [1, 0, 0],
         limit: 10,
       });
-      const remainingIds = queryResponse.data.result.map((r: { id: unknown }) => r.id);
+      const remainingIds = queryHits(queryResponse.data).map((r) => r.id);
       expect(remainingIds).not.toContain(1);
       expect(remainingIds).not.toContain(2);
       expect(remainingIds).toContain(3);
@@ -509,7 +520,7 @@ describe('Fake Qdrant HTTP API Integration Tests', () => {
         vector: [1, 0, 0],
         limit: 10,
       });
-      const remainingIds = queryResponse.data.result.map((r: { id: unknown }) => r.id);
+      const remainingIds = queryHits(queryResponse.data).map((r) => r.id);
       expect(remainingIds).not.toContain(1);
     });
 
@@ -561,6 +572,168 @@ describe('Fake Qdrant HTTP API Integration Tests', () => {
         },
         status: 'ok',
       });
+    });
+  });
+
+  describe('RooCode HTTP dialect', () => {
+    it('keeps points when PUT collection is repeated with the same size', async () => {
+      await httpRequest('PUT', '/collections/keep', {
+        vectors: { size: 2, distance: 'Cosine' },
+      });
+      await httpRequest('PUT', '/collections/keep/points', {
+        points: [{ id: 1, vector: [1, 0], payload: { keep: true } }],
+      });
+      const again = await httpRequest('PUT', '/collections/keep', {
+        vectors: { size: 2, distance: 'Cosine' },
+      });
+      expect(again.status).toBe(200);
+      const listed = await httpRequest('GET', '/collections');
+      expect(listed.data.result.collections[0].points_count).toBe(1);
+    });
+
+    it('returns 409 when PUT collection size mismatches', async () => {
+      await httpRequest('PUT', '/collections/sized', {
+        vectors: { size: 2, distance: 'Cosine' },
+      });
+      const response = await httpRequest('PUT', '/collections/sized', {
+        vectors: { size: 8, distance: 'Cosine' },
+      });
+      expect(response.status).toBe(409);
+    });
+
+    it('creates payload indexes and persists them in meta.json', async () => {
+      await httpRequest('PUT', '/collections/idx', {
+        vectors: { size: 2, distance: 'Cosine' },
+      });
+      const created = await httpRequest('PUT', '/collections/idx/index', {
+        field_name: 'pathSegments.0',
+        field_schema: 'keyword',
+      });
+      expect(created.status).toBe(200);
+      const again = await httpRequest('PUT', '/collections/idx/index', {
+        field_name: 'pathSegments.0',
+        field_schema: 'keyword',
+      });
+      expect(again.status).toBe(200);
+      const metaRaw = await fs.readFile(
+        path.join(testDataDir, 'idx', 'meta.json'),
+        'utf8'
+      );
+      const meta = JSON.parse(metaRaw);
+      expect(meta.indexes).toEqual(['pathSegments.0']);
+    });
+
+    it('returns 404 for index on a missing collection', async () => {
+      const response = await httpRequest('PUT', '/collections/nope/index', {
+        field_name: 'type',
+      });
+      expect(response.status).toBe(404);
+    });
+
+    it('returns 400 when field_name is missing', async () => {
+      await httpRequest('PUT', '/collections/idx2', {
+        vectors: { size: 2, distance: 'Cosine' },
+      });
+      const response = await httpRequest('PUT', '/collections/idx2/index', {});
+      expect(response.status).toBe(400);
+    });
+
+    it('deletes nested RooCode pathSegments filters', async () => {
+      await httpRequest('PUT', '/collections/roo', {
+        vectors: { size: 2, distance: 'Cosine' },
+      });
+      await httpRequest('PUT', '/collections/roo/index', {
+        field_name: 'pathSegments.0',
+      });
+      await httpRequest('PUT', '/collections/roo/points', {
+        points: [
+          {
+            id: 1,
+            vector: [1, 0],
+            payload: { pathSegments: ['config.py'] },
+          },
+          {
+            id: 2,
+            vector: [0, 1],
+            payload: { pathSegments: ['keep.py'] },
+          },
+        ],
+      });
+      const del = await httpRequest('POST', '/collections/roo/points/delete', {
+        filter: {
+          should: [
+            { must: [{ key: 'pathSegments.0', match: { value: 'config.py' } }] },
+          ],
+        },
+      });
+      expect(del.status).toBe(200);
+      expect(del.data.result.deleted).toBe(1);
+      const count = await httpRequest('POST', '/collections/roo/points/count', {});
+      expect(count.data.result.count).toBe(1);
+    });
+
+    it('does not delete re-upserted points when the same filter is retried within 60s', async () => {
+      await httpRequest('PUT', '/collections/dedup', {
+        vectors: { size: 2, distance: 'Cosine' },
+      });
+      const filter = {
+        must: [{ key: 'path', match: { value: '/dup.md' } }],
+      };
+      await httpRequest('PUT', '/collections/dedup/points', {
+        points: [{ id: 1, vector: [1, 0], payload: { path: '/dup.md' } }],
+      });
+      const first = await httpRequest('POST', '/collections/dedup/points/delete', {
+        filter,
+      });
+      expect(first.data.result.deleted).toBe(1);
+      await httpRequest('PUT', '/collections/dedup/points', {
+        points: [{ id: 2, vector: [1, 0], payload: { path: '/dup.md' } }],
+      });
+      const second = await httpRequest('POST', '/collections/dedup/points/delete', {
+        filter,
+      });
+      expect(second.status).toBe(200);
+      expect(second.data.result.dedup).toBe(true);
+      const count = await httpRequest('POST', '/collections/dedup/points/count', {});
+      expect(count.data.result.count).toBe(1);
+    });
+
+    it('scrolls, retrieves, counts, and filters queries', async () => {
+      await httpRequest('PUT', '/collections/extra', {
+        vectors: { size: 2, distance: 'Cosine' },
+      });
+      await httpRequest('PUT', '/collections/extra/points', {
+        points: [
+          { id: 1, vector: [1, 0], payload: { type: 'code' } },
+          { id: 2, vector: [0, 1], payload: { type: 'md' } },
+        ],
+      });
+      const scrolled = await httpRequest('POST', '/collections/extra/points/scroll', {
+        limit: 1,
+        offset: 0,
+      });
+      expect(scrolled.status).toBe(200);
+      expect(scrolled.data.result.points).toHaveLength(1);
+      const retrieved = await httpRequest('POST', '/collections/extra/points', {
+        ids: [2],
+      });
+      expect(retrieved.data.result.points[0].id).toBe(2);
+      const counted = await httpRequest('POST', '/collections/extra/points/count', {
+        filter: { must: [{ key: 'type', match: { value: 'md' } }] },
+      });
+      expect(counted.data.result.count).toBe(1);
+      const queried = await httpRequest('POST', '/collections/extra/points/query', {
+        vector: [1, 0],
+        filter: { must: [{ key: 'type', match: { value: 'code' } }] },
+      });
+      expect(queryHits(queried.data).map((hit) => hit.id)).toEqual([1]);
+    });
+
+    it('exposes metrics', async () => {
+      const response = await httpRequest('GET', '/metrics');
+      expect(response.status).toBe(200);
+      expect(response.data.result).toHaveProperty('busy');
+      expect(Array.isArray(response.data.result.collections)).toBe(true);
     });
   });
 
@@ -720,5 +893,16 @@ describe('Fake Qdrant HTTP API when the data dir is locked', () => {
     expect(created.data).toMatchObject({
       status: { error: 'service busy' },
     });
+  });
+});
+
+describe('summarizeHttpBody', () => {
+  it('clips codeChunk strings to 200 characters', () => {
+    const long = 'x'.repeat(500);
+    const summarized = summarizeHttpBody({
+      points: [{ payload: { codeChunk: long, path: '/a.ts' } }],
+    }) as { points: Array<{ payload: { codeChunk: { preview: string; length: number } } }> };
+    expect(summarized.points[0].payload.codeChunk.length).toBe(500);
+    expect(summarized.points[0].payload.codeChunk.preview).toHaveLength(200);
   });
 });

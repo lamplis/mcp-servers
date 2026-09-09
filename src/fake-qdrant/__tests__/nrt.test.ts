@@ -8,10 +8,12 @@
  *   4. GET  /collections/{name}                  (get)
  *   5. GET  /collections                         (list 1)
  *   6. PUT  /collections/{name}/points           (upsert)
+ *   6b. PUT /collections/{name}/index            (payload index)
  *   7. POST /collections/{name}/points/query     (query)
  *   8. POST /collections/{name}/points/query     (query with threshold)
  *   9. POST /collections/{name}/points/delete    (delete by ID)
  *  10. POST /collections/{name}/points/delete    (delete by filter)
+ *  10b. POST /points/scroll and /points/count
  *  11. POST /collections/{name}/compact          (compact)
  *  12. DELETE /collections/{name}                (delete collection)
  *  13. GET  /collections/{name}                  (verify 404)
@@ -151,6 +153,25 @@ describe("Fake Qdrant NRT (Non-Regression Test)", () => {
     expect(res.data.result.status).toBe("completed");
   });
 
+  function queryHits(data: any): any[] {
+    if (Array.isArray(data?.result?.points)) {
+      return data.result.points;
+    }
+    if (Array.isArray(data?.result)) {
+      return data.result;
+    }
+    return [];
+  }
+
+  it("Step 6b: PUT /index stores payload field names", async () => {
+    const res = await request("PUT", `/collections/${COLLECTION}/index`, {
+      field_name: "tag",
+      field_schema: "keyword",
+    });
+    expect(res.status).toBe(200);
+    expect(res.data.result).toBe(true);
+  });
+
   // --- 7. Query points ---
   it("Step 7: POST /collections/{name}/points/query returns scored results", async () => {
     const res = await request(
@@ -159,10 +180,11 @@ describe("Fake Qdrant NRT (Non-Regression Test)", () => {
       { vector: [1, 0, 0, 0], limit: 3 }
     );
     expect(res.status).toBe(200);
-    expect(res.data.result.length).toBeGreaterThanOrEqual(1);
-    expect(res.data.result[0].id).toBe(1);
-    expect(res.data.result[0].score).toBeGreaterThan(0.9);
-    expect(res.data.result[0].payload).toEqual({ tag: "x" });
+    const hits = queryHits(res.data);
+    expect(hits.length).toBeGreaterThanOrEqual(1);
+    expect(hits[0].id).toBe(1);
+    expect(hits[0].score).toBeGreaterThan(0.9);
+    expect(hits[0].payload).toEqual({ tag: "x" });
   });
 
   // --- 8. Query with score threshold ---
@@ -173,7 +195,7 @@ describe("Fake Qdrant NRT (Non-Regression Test)", () => {
       { vector: [1, 0, 0, 0], limit: 10, score_threshold: 0.99 }
     );
     expect(res.status).toBe(200);
-    for (const r of res.data.result) {
+    for (const r of queryHits(res.data)) {
       expect(r.score).toBeGreaterThanOrEqual(0.99);
     }
   });
@@ -193,7 +215,7 @@ describe("Fake Qdrant NRT (Non-Regression Test)", () => {
       `/collections/${COLLECTION}/points/query`,
       { vector: [0, 0, 0, 1], limit: 10 }
     );
-    const ids = query.data.result.map((r: any) => r.id);
+    const ids = queryHits(query.data).map((r: any) => r.id);
     expect(ids).not.toContain(4);
   });
 
@@ -216,8 +238,18 @@ describe("Fake Qdrant NRT (Non-Regression Test)", () => {
       `/collections/${COLLECTION}/points/query`,
       { vector: [0.5, 0.5, 0, 0], limit: 10 }
     );
-    const ids = query.data.result.map((r: any) => r.id);
+    const ids = queryHits(query.data).map((r: any) => r.id);
     expect(ids).not.toContain("s5");
+  });
+
+  it("Step 10b: scroll and count work", async () => {
+    const scrolled = await request("POST", `/collections/${COLLECTION}/points/scroll`, {
+      limit: 10,
+    });
+    expect(scrolled.status).toBe(200);
+    expect(scrolled.data.result.points.length).toBe(3);
+    const counted = await request("POST", `/collections/${COLLECTION}/points/count`, {});
+    expect(counted.data.result.count).toBe(3);
   });
 
   // --- 11. Compact collection ---

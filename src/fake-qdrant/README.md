@@ -54,6 +54,8 @@ The server exposes the following MCP tools:
 | `fake_qdrant_delete_collection` | Remove a collection and its data |
 | `fake_qdrant_upsert_points` | Insert or update vector points in a collection |
 | `fake_qdrant_query_points` | Run vector similarity search (KNN) |
+| `fake_qdrant_delete_points` | Delete points by id and/or Qdrant payload filter |
+| `fake_qdrant_collection_stats` | Point counts, JSONL lines, indexes, posting lists |
 | `fake_qdrant_compact_collection` | Rewrite unique JSONL snapshot (latest id wins) |
 | `fake_qdrant_persist_indexes` | Flush dirty collections to compact JSONL files |
 
@@ -107,12 +109,17 @@ When enabled, the server exposes a Qdrant-compatible HTTP API:
 |--------|----------|-------------|
 | `GET` | `/` | Health check |
 | `GET` | `/healthz` | Health check |
-| `GET` | `/collections` | List all collections |
-| `PUT` | `/collections/{name}` | Create a collection |
+| `GET` | `/metrics` | Collection stats and lock busy flag |
+| `GET` | `/collections` | List all collections (real point counts) |
+| `PUT` | `/collections/{name}` | Create collection (idempotent if size matches) |
 | `GET` | `/collections/{name}` | Get collection info |
 | `DELETE` | `/collections/{name}` | Delete a collection |
+| `PUT` | `/collections/{name}/index` | Record a payload keyword field |
 | `PUT` | `/collections/{name}/points` | Upsert points |
-| `POST` | `/collections/{name}/points/query` | Query/search points |
+| `POST` | `/collections/{name}/points` | Retrieve points by id |
+| `POST` | `/collections/{name}/points/query` | Query/search points (`result.points`) |
+| `POST` | `/collections/{name}/points/scroll` | Page through points |
+| `POST` | `/collections/{name}/points/count` | Count points (optional filter) |
 | `POST` | `/collections/{name}/points/delete` | Delete points by ID or filter |
 | `POST` | `/collections/{name}/compact` | Compact collection (custom endpoint) |
 
@@ -532,8 +539,8 @@ src/fake-qdrant/
 ## Limitations
 
 - **Distance Metrics:** Only Cosine similarity is currently supported
-- **Filters:** Basic filter support for delete operations (must/should conditions)
-- **Scroll/Pagination:** Not implemented for large result sets
+- **Filters:** Nested must/should/must_not on payload fields (including `pathSegments.N`)
+- **Scroll/Pagination:** `POST .../points/scroll` with limit/offset
 - **Sharding:** Single-node only, no distributed support
 - **Concurrency:** Overlapping requests in one process share files safely (one disk writer). A second process on the same data dir fails instead of corrupting JSONL. This is not multi-tenant isolation or authentication.
 

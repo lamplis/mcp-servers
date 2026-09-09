@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { Store, resolveDataDir } from "../store.js";
+import { matchFilter } from "../qdrant-filter.js";
 
 describe("Fake Qdrant JSONL store", () => {
   let store: Store;
@@ -82,5 +83,78 @@ describe("Fake Qdrant JSONL store", () => {
       "utf8"
     );
     expect(pointsFile).toContain('"id":7');
+  });
+
+  it("ensureCollection is idempotent and rejects size mismatch", async () => {
+    const first = await store.ensureCollection("keep", { size: 2 });
+    expect(first.created).toBe(true);
+    await store.upsertPoints("keep", [{ id: 1, vector: [1, 0], payload: null }]);
+    const second = await store.ensureCollection("keep", { size: 2 });
+    expect(second.created).toBe(false);
+    expect(second.info.pointsCount).toBe(1);
+    await expect(store.ensureCollection("keep", { size: 8 })).rejects.toMatchObject({
+      name: "CollectionSizeMismatchError",
+    });
+  });
+
+  it("persists payload indexes and rebuilds them after reload", async () => {
+    await store.createCollection("idx", { size: 2 });
+    expect(await store.ensurePayloadIndex("idx", "type")).toBe(true);
+    await store.upsertPoints("idx", [
+      { id: 1, vector: [1, 0], payload: { type: "code" } },
+    ]);
+    await store.close();
+    const reloaded = await Store.create({ dataDir: testDataDir });
+    const info = await reloaded.getCollection("idx");
+    expect(info?.vectors.indexes).toEqual(["type"]);
+    const stats = await reloaded.getCollectionStats("idx");
+    expect(stats[0]?.postingListSizes.type).toBe(1);
+    await reloaded.close();
+  });
+
+  it("appends tombstones on delete and compact restores unique live lines", async () => {
+    await store.createCollection("tomb", { size: 2 });
+    await store.upsertPoints("tomb", [
+      { id: 1, vector: [1, 0], payload: { path: "/a" } },
+      { id: 2, vector: [0, 1], payload: { path: "/b" } },
+      { id: 3, vector: [1, 1], payload: { path: "/c" } },
+    ]);
+    const deleted = await store.deletePoints("tomb", [1]);
+    expect(deleted).toBe(1);
+    const raw = await fs.readFile(
+      path.join(testDataDir, "tomb", "points.jsonl"),
+      "utf8"
+    );
+    expect(raw).toContain('"op":"delete"');
+    const unique = await store.compactCollection("tomb");
+    expect(unique).toBe(2);
+    const compacted = await fs.readFile(
+      path.join(testDataDir, "tomb", "points.jsonl"),
+      "utf8"
+    );
+    expect(compacted).not.toContain('"op":"delete"');
+    expect(compacted.split("\n").filter((line) => line.trim()).length).toBe(2);
+  });
+
+  it("filters query and delete by nested payload fields", async () => {
+    await store.createCollection("roo", { size: 2 });
+    await store.ensurePayloadIndex("roo", "pathSegments.0");
+    await store.upsertPoints("roo", [
+      { id: 1, vector: [1, 0], payload: { pathSegments: ["config.py"] } },
+      { id: 2, vector: [0, 1], payload: { pathSegments: ["keep.py"] } },
+    ]);
+    const filter = {
+      should: [{ must: [{ key: "pathSegments.0", match: { value: "config.py" } }] }],
+    };
+    const hits = await store.query("roo", [1, 0], { filter, limit: 10 });
+    expect(hits.map((hit) => hit.id)).toEqual([1]);
+    const removed = await store.deletePoints(
+      "roo",
+      undefined,
+      (payload) => matchFilter(payload, filter),
+      filter
+    );
+    expect(removed).toBe(1);
+    expect(await store.countPoints("roo")).toBe(1);
   });
 });

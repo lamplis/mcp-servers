@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { DiskGate } from "./disk-gate.js";
 import { Store, type PointRecord } from "./store.js";
+import { matchFilter } from "./qdrant-filter.js";
 import type { EmbeddingProvider } from "./provider.js";
 import type { Logger } from "./logger.js";
 
@@ -393,6 +394,108 @@ function registerTools(
           };
         },
         (result) => ({ name, uniquePoints: result.structuredContent?.uniquePoints })
+      )
+  );
+
+  server.registerTool(
+    "fake_qdrant_delete_points",
+    {
+      title: "Delete points from fake Qdrant",
+      description:
+        "Remove points by id and/or a Qdrant-style payload filter (must/should/must_not).",
+      inputSchema: {
+        collection: z.string().describe("Collection name."),
+        ids: z
+          .array(z.union([z.string(), z.number()]))
+          .optional()
+          .describe("Point ids to delete."),
+        filter: z
+          .any()
+          .optional()
+          .describe("Qdrant payload filter (must/should/must_not)."),
+      },
+      outputSchema: {
+        deleted: z.number(),
+      },
+    },
+    async ({ collection, ids, filter }) =>
+      runLoggedTool(
+        logger,
+        "fake_qdrant_delete_points",
+        async () => {
+          if ((!ids || ids.length === 0) && filter == null) {
+            throw new Error("Provide ids and/or filter");
+          }
+          const deleted = await store.deletePoints(
+            collection,
+            ids,
+            filter != null ? (payload) => matchFilter(payload, filter) : undefined,
+            filter
+          );
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Deleted ${deleted} point(s) from ${collection}`,
+              },
+            ],
+            structuredContent: { deleted },
+          };
+        },
+        (result) => ({
+          collection,
+          deleted: result.structuredContent?.deleted,
+          idCount: ids?.length ?? 0,
+          hasFilter: filter != null,
+        })
+      )
+  );
+
+  server.registerTool(
+    "fake_qdrant_collection_stats",
+    {
+      title: "Fake Qdrant collection stats",
+      description:
+        "Points, JSONL line count, payload indexes, and posting-list sizes.",
+      inputSchema: {
+        name: z.string().optional().describe("Collection name; omit to list all."),
+      },
+      outputSchema: {
+        collections: z.array(
+          z.object({
+            name: z.string(),
+            size: z.number(),
+            distance: z.string(),
+            pointsCount: z.number(),
+            jsonlLines: z.number(),
+            indexes: z.array(z.string()),
+            postingListSizes: z.record(z.number()),
+          })
+        ),
+      },
+    },
+    async ({ name }) =>
+      runLoggedTool(
+        logger,
+        "fake_qdrant_collection_stats",
+        async () => {
+          const collections = await store.getCollectionStats(name);
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify(collections, null, 2),
+              },
+            ],
+            structuredContent: { collections },
+          };
+        },
+        (result) => ({
+          name: name ?? "all",
+          count: Array.isArray(result.structuredContent?.collections)
+            ? result.structuredContent.collections.length
+            : 0,
+        })
       )
   );
 
