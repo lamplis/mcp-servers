@@ -8,6 +8,9 @@ describe("loadConfig", () => {
     expect(config.httpHost).toBe("127.0.0.1");
     expect(config.httpPort).toBe(6333);
     expect(config.dataDir).toBe("./data/fake-qdrant");
+    expect(config.logDir).toBeNull();
+    expect(config.logLevel).toBe("info");
+    expect(config.logRetentionDays).toBe(3);
     expect(config.embeddingProvider).toBe("local");
     expect(config.embeddingBaseUrl).toBeNull();
     expect(config.embeddingModel).toBeNull();
@@ -36,6 +39,26 @@ describe("loadConfig", () => {
   it("should parse data dir", () => {
     const config = loadConfig({ FAKE_QDRANT_DATA_DIR: "/tmp/vectors" });
     expect(config.dataDir).toBe("/tmp/vectors");
+  });
+
+  it("should parse log dir, level, and retention", () => {
+    const config = loadConfig({
+      FAKE_QDRANT_LOG_DIR: "C:\\logs\\fake-qdrant",
+      FAKE_QDRANT_LOG_LEVEL: "debug",
+      FAKE_QDRANT_LOG_RETENTION_DAYS: "5",
+    });
+    expect(config.logDir).toBe("C:\\logs\\fake-qdrant");
+    expect(config.logLevel).toBe("debug");
+    expect(config.logRetentionDays).toBe(5);
+  });
+
+  it("should fall back for invalid log level and retention", () => {
+    const config = loadConfig({
+      FAKE_QDRANT_LOG_LEVEL: "verbose",
+      FAKE_QDRANT_LOG_RETENTION_DAYS: "nope",
+    });
+    expect(config.logLevel).toBe("info");
+    expect(config.logRetentionDays).toBe(3);
   });
 
   it("should parse local embedding provider", () => {

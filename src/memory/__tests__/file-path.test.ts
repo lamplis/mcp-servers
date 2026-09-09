@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { ensureMemoryFilePath, defaultMemoryPath } from '../index.js';
+import { ensureMemoryFilePath, defaultMemoryPath, resolveMemoryLogConfig } from '../server.js';
 
 describe('ensureMemoryFilePath', () => {
   const testDir = path.dirname(fileURLToPath(import.meta.url));
@@ -152,5 +152,26 @@ describe('ensureMemoryFilePath', () => {
     it('should be an absolute path', () => {
       expect(path.isAbsolute(defaultMemoryPath)).toBe(true);
     });
+  });
+});
+
+describe('resolveMemoryLogConfig', () => {
+  it('defaults to a logs folder beside the memory file', () => {
+    const memoryFile = path.join('C:', 'data', 'memory.jsonl');
+    const config = resolveMemoryLogConfig(memoryFile, {});
+    expect(config.logDir).toBe(path.join(path.dirname(path.resolve(memoryFile)), 'logs'));
+    expect(config.level).toBe('info');
+    expect(config.retentionDays).toBe(3);
+  });
+
+  it('honors MEMORY_LOG_DIR, MEMORY_LOG_LEVEL, and MEMORY_LOG_RETENTION_DAYS', () => {
+    const config = resolveMemoryLogConfig('/tmp/memory.jsonl', {
+      MEMORY_LOG_DIR: path.resolve('/tmp/custom-logs'),
+      MEMORY_LOG_LEVEL: 'warn',
+      MEMORY_LOG_RETENTION_DAYS: '4',
+    });
+    expect(config.logDir).toBe(path.resolve('/tmp/custom-logs'));
+    expect(config.level).toBe('warn');
+    expect(config.retentionDays).toBe(4);
   });
 });

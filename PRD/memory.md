@@ -48,6 +48,7 @@ Enable LLMs to maintain persistent memory across conversations, storing informat
 5. **Persistent Storage** - JSONL format for durability
 6. **Search Capabilities** - Search across names, types, and observations
 7. **Graph Traversal** - Retrieve entities with their relationships
+8. **Daily file logs** - JSONL logs beside the memory file (`logs/YYYY-MM-DD.log`), kept for 3 local days
 
 ## Tools/API Reference
 
@@ -230,6 +231,9 @@ Enable LLMs to maintain persistent memory across conversations, storing informat
 
 ### Configuration Options
 - `MEMORY_FILE_PATH`: Custom path to memory storage file (default: `memory.jsonl`)
+- `MEMORY_LOG_DIR`: Daily JSONL debug logs (default: `{dirname(memoryFile)}/logs`)
+- `MEMORY_LOG_LEVEL`: `debug` | `info` | `warn` | `error` (default: `info`)
+- `MEMORY_LOG_RETENTION_DAYS`: Keep this many local calendar days of log files (default: `3`)
 - Supports absolute and relative paths
 - Automatic migration from legacy `memory.json` format
 

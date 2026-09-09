@@ -181,6 +181,11 @@ The server can be configured using the following environment variables:
 ```
 
 - `MEMORY_FILE_PATH`: Path to the memory storage JSONL file (default: `memory.jsonl` in the server directory)
+- `MEMORY_LOG_DIR`: Directory for daily JSONL debug logs (default: a `logs` folder beside the memory file)
+- `MEMORY_LOG_LEVEL`: `debug`, `info`, `warn`, or `error` (default: `info`)
+- `MEMORY_LOG_RETENTION_DAYS`: How many local calendar days of log files to keep (default: `3`)
+
+MCP stdio output is not retained by RooCode / VS Code. After an error, open `{memoryFileDir}/logs/YYYY-MM-DD.log`. Each line is one JSON object. Tool calls are logged as `mcp.tool` with names and counts (not full graph dumps). Warn and error lines are also mirrored to stderr.
 
 # VS Code Installation Instructions
 

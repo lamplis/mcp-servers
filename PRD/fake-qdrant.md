@@ -49,6 +49,7 @@ Give local development a Qdrant-like collection and query surface that works on 
 6. **HTTP Shim** - Loopback Qdrant-like REST when `FAKE_QDRANT_ENABLED=1`.
 7. **Maintenance** - `fake_qdrant_compact_collection` and `fake_qdrant_persist_indexes`.
 8. **Optional embedding helper** - `provider.ts` can call a local or OpenAI-compatible HTTP embeddings API. MCP upsert still takes raw vectors; the helper is not the storage engine.
+9. **Daily file logs** - JSONL logs under `{dataDir}/logs/YYYY-MM-DD.log`, kept for 3 local days, so RooCode/VS Code HTTP and MCP failures can be reproduced from disk.
 
 ### Architecture Summary
 - In-memory `Map` per collection; cosine computed in JavaScript.
@@ -163,6 +164,9 @@ Give local development a Qdrant-like collection and query surface that works on 
 - `FAKE_QDRANT_HTTP_HOST` - bind host (default `127.0.0.1`)
 - `FAKE_QDRANT_HTTP_PORT` - bind port (default `6333`)
 - `FAKE_QDRANT_DATA_DIR` - JSONL collection root (default `./data/fake-qdrant`)
+- `FAKE_QDRANT_LOG_DIR` - daily JSONL debug logs (default `{resolvedDataDir}/logs`)
+- `FAKE_QDRANT_LOG_LEVEL` - `debug` | `info` | `warn` | `error` (default `info`)
+- `FAKE_QDRANT_LOG_RETENTION_DAYS` - keep this many local calendar days of log files (default `3`)
 - Optional helper only (not used by MCP upsert): `FAKE_QDRANT_EMBEDDING_PROVIDER`, `FAKE_QDRANT_EMBEDDING_BASE_URL`, `FAKE_QDRANT_EMBEDDING_MODEL`, `FAKE_QDRANT_LOCAL_EMBEDDINGS_TARGET`
 
 Startup reads these through `loadConfig()` and passes `dataDir` / HTTP bind into the store and shim.
@@ -182,9 +186,10 @@ Startup reads these through `loadConfig()` and passes `dataDir` / HTTP bind into
 - Intended for trusted workstation use
 
 ### Testing Requirements
-- Config parsing (`loadConfig`) for HTTP, data dir, and optional embedding-provider helper
+- Config parsing (`loadConfig`) for HTTP, data dir, log dir/level/retention, and optional embedding-provider helper
 - Collection create, upsert, query, compact, persist
 - HTTP shim for the supported route subset
+- Daily file logger: local-date filename, midnight rollover, 3-day prune, vector redaction, no stdout
 - Tests run from npm-installed dependencies with no native SQLite
 
 ## Configuration and Deployment
@@ -235,7 +240,7 @@ npx tsx src/fake-qdrant/index.ts
 - Full Qdrant parity, clustering, replication
 - Auth / multi-user tenancy
 - Built-in embedding or document ingest
-- Production observability
+- Production APM, metrics, or remote log shipping
 
 ## Future Considerations
 

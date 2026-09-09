@@ -313,6 +313,10 @@ cython_debug/
 # Fake Qdrant local data (vector store)
 src/fake-qdrant/data/
 
+# Daily MCP debug logs (also covered by *.log)
+src/memory/logs/
+data/fake-qdrant/logs/
+
 # Runtime JSON / leftover SQLite indexes (do not commit)
 data/**/*.db
 data/**/*.db-wal

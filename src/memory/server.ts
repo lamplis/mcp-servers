@@ -3,20 +3,57 @@ import { z } from "zod";
 import { promises as fs } from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import {
+  parseLogLevel,
+  parseRetentionDays,
+  type Logger,
+  type LogLevel,
+} from "./logger.js";
 
 export const defaultMemoryPath = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
   "memory.jsonl"
 );
 
-export async function ensureMemoryFilePath(): Promise<string> {
-  if (process.env.MEMORY_FILE_PATH) {
-    return path.isAbsolute(process.env.MEMORY_FILE_PATH)
-      ? process.env.MEMORY_FILE_PATH
+export function resolveMemoryFilePathFromEnv(
+  env: Record<string, string | undefined> = process.env
+): string {
+  if (env.MEMORY_FILE_PATH) {
+    return path.isAbsolute(env.MEMORY_FILE_PATH)
+      ? env.MEMORY_FILE_PATH
       : path.join(
           path.dirname(fileURLToPath(import.meta.url)),
-          process.env.MEMORY_FILE_PATH
+          env.MEMORY_FILE_PATH
         );
+  }
+  return defaultMemoryPath;
+}
+
+export interface MemoryLogConfig {
+  logDir: string;
+  level: LogLevel;
+  retentionDays: number;
+}
+
+export function resolveMemoryLogConfig(
+  memoryFilePath: string,
+  env: Record<string, string | undefined> = process.env
+): MemoryLogConfig {
+  const logDir = env.MEMORY_LOG_DIR
+    ? path.resolve(env.MEMORY_LOG_DIR)
+    : path.join(path.dirname(path.resolve(memoryFilePath)), "logs");
+  return {
+    logDir,
+    level: parseLogLevel(env.MEMORY_LOG_LEVEL),
+    retentionDays: parseRetentionDays(env.MEMORY_LOG_RETENTION_DAYS),
+  };
+}
+
+export async function ensureMemoryFilePath(
+  logger?: Logger
+): Promise<string> {
+  if (process.env.MEMORY_FILE_PATH) {
+    return resolveMemoryFilePathFromEnv();
   }
 
   const oldMemoryPath = path.join(
@@ -31,13 +68,21 @@ export async function ensureMemoryFilePath(): Promise<string> {
       await fs.access(newMemoryPath);
       return newMemoryPath;
     } catch {
-      console.error(
-        "DETECTED: Found legacy memory.json file, migrating to memory.jsonl for JSONL format compatibility"
-      );
+      const detected =
+        "DETECTED: Found legacy memory.json file, migrating to memory.jsonl for JSONL format compatibility";
+      const completed =
+        "COMPLETED: Successfully migrated memory.json to memory.jsonl";
+      if (logger) {
+        logger.info("memory.migrate", { from: oldMemoryPath, to: newMemoryPath, message: detected });
+      } else {
+        console.error(detected);
+      }
       await fs.rename(oldMemoryPath, newMemoryPath);
-      console.error(
-        "COMPLETED: Successfully migrated memory.json to memory.jsonl"
-      );
+      if (logger) {
+        logger.info("memory.migrate", { from: oldMemoryPath, to: newMemoryPath, message: completed });
+      } else {
+        console.error(completed);
+      }
       return newMemoryPath;
     }
   } catch {
@@ -63,18 +108,29 @@ export interface KnowledgeGraph {
 }
 
 export class KnowledgeGraphManager {
-  constructor(private memoryFilePath: string) {}
+  constructor(
+    private memoryFilePath: string,
+    private logger?: Logger
+  ) {}
 
   private async loadGraph(): Promise<KnowledgeGraph> {
     try {
       const data = await fs.readFile(this.memoryFilePath, "utf-8");
       const lines = data.split("\n").filter((line) => line.trim() !== "");
       return lines.reduce(
-        (graph: KnowledgeGraph, line) => {
-          const item = JSON.parse(line);
-          if (item.type === "entity") graph.entities.push(item as Entity);
-          if (item.type === "relation") graph.relations.push(item as Relation);
-          return graph;
+        (graph: KnowledgeGraph, line, index) => {
+          try {
+            const item = JSON.parse(line);
+            if (item.type === "entity") graph.entities.push(item as Entity);
+            if (item.type === "relation") graph.relations.push(item as Relation);
+            return graph;
+          } catch (error) {
+            this.logger?.error("memory.jsonl.parse", {
+              line: index + 1,
+              error: error instanceof Error ? error.message : String(error),
+            });
+            throw error;
+          }
         },
         { entities: [], relations: [] }
       );
@@ -270,7 +326,38 @@ const RelationSchema = z.object({
   relationType: z.string().describe("The type of the relation"),
 });
 
-function registerTools(server: McpServer, manager: KnowledgeGraphManager) {
+async function runLoggedTool<T>(
+  logger: Logger | undefined,
+  tool: string,
+  fn: () => Promise<T>,
+  summarize?: (result: T) => Record<string, unknown>
+): Promise<T> {
+  const start = Date.now();
+  try {
+    const result = await fn();
+    logger?.info("mcp.tool", {
+      tool,
+      ok: true,
+      ms: Date.now() - start,
+      ...(summarize ? summarize(result) : {}),
+    });
+    return result;
+  } catch (error) {
+    logger?.error("mcp.tool", {
+      tool,
+      ok: false,
+      ms: Date.now() - start,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
+}
+
+function registerTools(
+  server: McpServer,
+  manager: KnowledgeGraphManager,
+  logger?: Logger
+) {
   server.registerTool(
     "create_entities",
     {
@@ -283,15 +370,26 @@ function registerTools(server: McpServer, manager: KnowledgeGraphManager) {
         entities: z.array(EntitySchema),
       },
     },
-    async ({ entities }) => {
-      const result = await manager.createEntities(entities);
-      return {
-        content: [
-          { type: "text" as const, text: JSON.stringify(result, null, 2) },
-        ],
-        structuredContent: { entities: result },
-      };
-    }
+    async ({ entities }) =>
+      runLoggedTool(
+        logger,
+        "create_entities",
+        async () => {
+          const result = await manager.createEntities(entities);
+          return {
+            content: [
+              { type: "text" as const, text: JSON.stringify(result, null, 2) },
+            ],
+            structuredContent: { entities: result },
+          };
+        },
+        (result) => ({
+          requested: entities.length,
+          created: result.structuredContent.entities.length,
+          skipped: entities.length - result.structuredContent.entities.length,
+          names: result.structuredContent.entities.map((entity) => entity.name),
+        })
+      )
   );
 
   server.registerTool(
@@ -307,15 +405,30 @@ function registerTools(server: McpServer, manager: KnowledgeGraphManager) {
         relations: z.array(RelationSchema),
       },
     },
-    async ({ relations }) => {
-      const result = await manager.createRelations(relations);
-      return {
-        content: [
-          { type: "text" as const, text: JSON.stringify(result, null, 2) },
-        ],
-        structuredContent: { relations: result },
-      };
-    }
+    async ({ relations }) =>
+      runLoggedTool(
+        logger,
+        "create_relations",
+        async () => {
+          const result = await manager.createRelations(relations);
+          return {
+            content: [
+              { type: "text" as const, text: JSON.stringify(result, null, 2) },
+            ],
+            structuredContent: { relations: result },
+          };
+        },
+        (result) => ({
+          requested: relations.length,
+          created: result.structuredContent.relations.length,
+          skipped: relations.length - result.structuredContent.relations.length,
+          relations: result.structuredContent.relations.map((relation) => ({
+            from: relation.from,
+            to: relation.to,
+            relationType: relation.relationType,
+          })),
+        })
+      )
   );
 
   server.registerTool(
@@ -344,15 +457,28 @@ function registerTools(server: McpServer, manager: KnowledgeGraphManager) {
         ),
       },
     },
-    async ({ observations }) => {
-      const result = await manager.addObservations(observations);
-      return {
-        content: [
-          { type: "text" as const, text: JSON.stringify(result, null, 2) },
-        ],
-        structuredContent: { results: result },
-      };
-    }
+    async ({ observations }) =>
+      runLoggedTool(
+        logger,
+        "add_observations",
+        async () => {
+          const result = await manager.addObservations(observations);
+          return {
+            content: [
+              { type: "text" as const, text: JSON.stringify(result, null, 2) },
+            ],
+            structuredContent: { results: result },
+          };
+        },
+        (result) => ({
+          entityNames: result.structuredContent.results.map((row) => row.entityName),
+          added: result.structuredContent.results.reduce(
+            (sum, row) => sum + row.addedObservations.length,
+            0
+          ),
+          requested: observations.reduce((sum, row) => sum + row.contents.length, 0),
+        })
+      )
   );
 
   server.registerTool(
@@ -371,18 +497,24 @@ function registerTools(server: McpServer, manager: KnowledgeGraphManager) {
         message: z.string(),
       },
     },
-    async ({ entityNames }) => {
-      await manager.deleteEntities(entityNames);
-      return {
-        content: [
-          { type: "text" as const, text: "Entities deleted successfully" },
-        ],
-        structuredContent: {
-          success: true,
-          message: "Entities deleted successfully",
+    async ({ entityNames }) =>
+      runLoggedTool(
+        logger,
+        "delete_entities",
+        async () => {
+          await manager.deleteEntities(entityNames);
+          return {
+            content: [
+              { type: "text" as const, text: "Entities deleted successfully" },
+            ],
+            structuredContent: {
+              success: true,
+              message: "Entities deleted successfully",
+            },
+          };
         },
-      };
-    }
+        () => ({ entityNames })
+      )
   );
 
   server.registerTool(
@@ -408,18 +540,30 @@ function registerTools(server: McpServer, manager: KnowledgeGraphManager) {
         message: z.string(),
       },
     },
-    async ({ deletions }) => {
-      await manager.deleteObservations(deletions);
-      return {
-        content: [
-          { type: "text" as const, text: "Observations deleted successfully" },
-        ],
-        structuredContent: {
-          success: true,
-          message: "Observations deleted successfully",
+    async ({ deletions }) =>
+      runLoggedTool(
+        logger,
+        "delete_observations",
+        async () => {
+          await manager.deleteObservations(deletions);
+          return {
+            content: [
+              { type: "text" as const, text: "Observations deleted successfully" },
+            ],
+            structuredContent: {
+              success: true,
+              message: "Observations deleted successfully",
+            },
+          };
         },
-      };
-    }
+        () => ({
+          entityNames: deletions.map((row) => row.entityName),
+          counts: deletions.map((row) => ({
+            entityName: row.entityName,
+            requested: row.observations.length,
+          })),
+        })
+      )
   );
 
   server.registerTool(
@@ -437,18 +581,30 @@ function registerTools(server: McpServer, manager: KnowledgeGraphManager) {
         message: z.string(),
       },
     },
-    async ({ relations }) => {
-      await manager.deleteRelations(relations);
-      return {
-        content: [
-          { type: "text" as const, text: "Relations deleted successfully" },
-        ],
-        structuredContent: {
-          success: true,
-          message: "Relations deleted successfully",
+    async ({ relations }) =>
+      runLoggedTool(
+        logger,
+        "delete_relations",
+        async () => {
+          await manager.deleteRelations(relations);
+          return {
+            content: [
+              { type: "text" as const, text: "Relations deleted successfully" },
+            ],
+            structuredContent: {
+              success: true,
+              message: "Relations deleted successfully",
+            },
+          };
         },
-      };
-    }
+        () => ({
+          relations: relations.map((relation) => ({
+            from: relation.from,
+            to: relation.to,
+            relationType: relation.relationType,
+          })),
+        })
+      )
   );
 
   server.registerTool(
@@ -462,15 +618,24 @@ function registerTools(server: McpServer, manager: KnowledgeGraphManager) {
         relations: z.array(RelationSchema),
       },
     },
-    async () => {
-      const graph = await manager.readGraph();
-      return {
-        content: [
-          { type: "text" as const, text: JSON.stringify(graph, null, 2) },
-        ],
-        structuredContent: { ...graph },
-      };
-    }
+    async () =>
+      runLoggedTool(
+        logger,
+        "read_graph",
+        async () => {
+          const graph = await manager.readGraph();
+          return {
+            content: [
+              { type: "text" as const, text: JSON.stringify(graph, null, 2) },
+            ],
+            structuredContent: { ...graph },
+          };
+        },
+        (result) => ({
+          entityCount: result.structuredContent.entities.length,
+          relationCount: result.structuredContent.relations.length,
+        })
+      )
   );
 
   server.registerTool(
@@ -491,15 +656,25 @@ function registerTools(server: McpServer, manager: KnowledgeGraphManager) {
         relations: z.array(RelationSchema),
       },
     },
-    async ({ query }) => {
-      const graph = await manager.searchNodes(query);
-      return {
-        content: [
-          { type: "text" as const, text: JSON.stringify(graph, null, 2) },
-        ],
-        structuredContent: { ...graph },
-      };
-    }
+    async ({ query }) =>
+      runLoggedTool(
+        logger,
+        "search_nodes",
+        async () => {
+          const graph = await manager.searchNodes(query);
+          return {
+            content: [
+              { type: "text" as const, text: JSON.stringify(graph, null, 2) },
+            ],
+            structuredContent: { ...graph },
+          };
+        },
+        (result) => ({
+          query,
+          entityCount: result.structuredContent.entities.length,
+          relationCount: result.structuredContent.relations.length,
+        })
+      )
   );
 
   server.registerTool(
@@ -518,32 +693,52 @@ function registerTools(server: McpServer, manager: KnowledgeGraphManager) {
         relations: z.array(RelationSchema),
       },
     },
-    async ({ names }) => {
-      const graph = await manager.openNodes(names);
-      return {
-        content: [
-          { type: "text" as const, text: JSON.stringify(graph, null, 2) },
-        ],
-        structuredContent: { ...graph },
-      };
-    }
+    async ({ names }) =>
+      runLoggedTool(
+        logger,
+        "open_nodes",
+        async () => {
+          const graph = await manager.openNodes(names);
+          return {
+            content: [
+              { type: "text" as const, text: JSON.stringify(graph, null, 2) },
+            ],
+            structuredContent: { ...graph },
+          };
+        },
+        (result) => ({
+          requested: names,
+          found: result.structuredContent.entities.map((entity) => entity.name),
+          entityCount: result.structuredContent.entities.length,
+          relationCount: result.structuredContent.relations.length,
+        })
+      )
   );
 }
+
+export type MemoryServerFactoryOptions = {
+  logger?: Logger;
+};
 
 export type MemoryServerFactoryResponse = {
   server: McpServer;
   cleanup: (sessionId?: string) => void;
 };
 
-export async function createServer(): Promise<MemoryServerFactoryResponse> {
-  const memoryFilePath = await ensureMemoryFilePath();
-  const knowledgeGraphManager = new KnowledgeGraphManager(memoryFilePath);
+export async function createServer(
+  options: MemoryServerFactoryOptions = {}
+): Promise<MemoryServerFactoryResponse> {
+  const memoryFilePath = await ensureMemoryFilePath(options.logger);
+  const knowledgeGraphManager = new KnowledgeGraphManager(
+    memoryFilePath,
+    options.logger
+  );
   const server = new McpServer({
     name: "memory-server",
     version: "0.6.3",
   });
 
-  registerTools(server, knowledgeGraphManager);
+  registerTools(server, knowledgeGraphManager, options.logger);
 
   return {
     server,

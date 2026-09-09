@@ -1,12 +1,25 @@
 import http from "node:http";
 import { URL } from "node:url";
 import { Store } from "./store.js";
+import { toLogger, type Logger } from "./logger.js";
 
 export interface QdrantHttpServerOptions {
   store: Store;
   host?: string;
   port?: number;
-  logger?: (message: string) => void;
+  logger?: Logger | ((message: string) => void);
+}
+
+interface HttpRequestLog {
+  method: string;
+  path: string;
+  rawUrl: string;
+  userAgent?: string;
+  contentLength?: string;
+  reqBody?: unknown;
+  status?: number;
+  resBody?: unknown;
+  health?: boolean;
 }
 
 export interface QdrantHttpServerHandle {
@@ -25,21 +38,35 @@ export async function startQdrantHttpServer(
 
   const host = options.host ?? process.env.FAKE_QDRANT_HTTP_HOST ?? "127.0.0.1";
   const port = options.port ?? Number(process.env.FAKE_QDRANT_HTTP_PORT ?? 6333);
-  const logger = options.logger ?? ((message: string) => console.error(message));
+  const logger = toLogger(options.logger);
 
   const server = http.createServer(async (req, res) => {
+    const started = Date.now();
+    const path = requestPath(req);
+    const requestLog: HttpRequestLog = {
+      method: (req.method ?? "").toUpperCase(),
+      path,
+      rawUrl: req.url ?? "",
+      userAgent: headerValue(req, "user-agent"),
+      contentLength: headerValue(req, "content-length"),
+      health: isRead(req.method) && isHealthPath(path),
+    };
     try {
-      await handleRequest(req, res, options.store);
+      await handleRequest(req, res, options.store, requestLog);
     } catch (error) {
-      logger(
-        `[fake-qdrant] Request failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`
+      sendJson(
+        res,
+        500,
+        {
+          status: {
+            error: "internal server error",
+            message: error instanceof Error ? error.message : String(error),
+          },
+        },
+        requestLog
       );
-      sendJson(res, 500, {
-        status: { error: "internal server error" },
-      });
     }
+    emitHttpLog(logger, requestLog, Date.now() - started);
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -54,7 +81,7 @@ export async function startQdrantHttpServer(
   const address = server.address();
   const actualPort = typeof address === "object" && address ? address.port : port;
   
-  logger(`[fake-qdrant] HTTP shim listening on http://${host}:${actualPort}`);
+  logger.info("http.listen", { host, port: actualPort });
 
   return {
     server,
@@ -90,6 +117,41 @@ function requestPath(req: http.IncomingMessage): string {
   );
 }
 
+function headerValue(
+  req: http.IncomingMessage,
+  name: string
+): string | undefined {
+  const value = req.headers[name];
+  if (Array.isArray(value)) {
+    return value[0];
+  }
+  return value;
+}
+
+function emitHttpLog(logger: Logger, log: HttpRequestLog, ms: number): void {
+  const status = log.status ?? 0;
+  const fields: Record<string, unknown> = {
+    method: log.method,
+    path: log.path,
+    rawUrl: log.rawUrl,
+    status,
+    ms,
+    userAgent: log.userAgent,
+    contentLength: log.contentLength,
+  };
+  if (!log.health) {
+    fields.reqBody = log.reqBody;
+    fields.resBody = log.resBody;
+  }
+  if (status >= 500) {
+    logger.error("http.request", fields);
+  } else if (status >= 400) {
+    logger.warn("http.request", fields);
+  } else {
+    logger.info("http.request", fields);
+  }
+}
+
 function isRead(method: string | undefined): boolean {
   const m = (method ?? "").toUpperCase();
   return m === "GET" || m === "HEAD";
@@ -112,20 +174,25 @@ function isHealthPath(path: string): boolean {
 async function handleRequest(
   req: http.IncomingMessage,
   res: http.ServerResponse,
-  store: Store
+  store: Store,
+  requestLog: HttpRequestLog
 ) {
+  const json = (status: number, payload: unknown) =>
+    sendJson(res, status, payload, requestLog);
+
   if (req.method === "OPTIONS") {
-    return sendJson(res, 200, {});
+    return json(200, {});
   }
   const path = requestPath(req);
+  requestLog.path = path;
 
-  // Debug logging for delete requests
-  if (req.method === "POST" && path.includes("/points/delete")) {
-    console.error(`[fake-qdrant] DELETE request: ${req.method} ${path}`);
+  const method = (req.method ?? "").toUpperCase();
+  if (method === "PUT" || method === "POST") {
+    requestLog.reqBody = await readJsonBody(req);
   }
 
   if (isRead(req.method) && isHealthPath(path)) {
-    return sendJson(res, 200, {
+    return json(200, {
       status: "ok",
       sidecar: "fake-qdrant-mcp",
       title: "qdrant - vector search engine",
@@ -135,7 +202,7 @@ async function handleRequest(
 
   if (isRead(req.method) && path === "/collections") {
     const collections = await store.listCollections();
-    return sendJson(res, 200, {
+    return json(200, {
       result: {
         collections: collections.map((collection) => ({
           name: collection.name,
@@ -158,7 +225,7 @@ async function handleRequest(
 
   const match = path.match(/^\/collections\/([^/]+)(\/.*)?$/);
   if (!match) {
-    return sendJson(res, 404, { status: { error: "not found" } });
+    return json(404, { status: { error: "not found" } });
   }
   const collectionName = decodeURIComponent(match[1]);
   const remainder = match[2] ?? "";
@@ -166,11 +233,11 @@ async function handleRequest(
   if (req.method === "GET" && remainder === "") {
     const collection = await store.getCollection(collectionName);
     if (!collection) {
-      return sendJson(res, 404, {
+      return json(404, {
         status: { error: "collection not found" },
       });
     }
-    return sendJson(res, 200, {
+    return json(200, {
       result: {
         ...collection,
         status: "green",
@@ -181,7 +248,7 @@ async function handleRequest(
   }
 
   if (req.method === "PUT" && remainder === "") {
-    const body = await readJsonBody(req);
+    const body = requestLog.reqBody as any;
     const vectors =
       body?.vectors ??
       body?.config?.params?.vectors ??
@@ -193,14 +260,14 @@ async function handleRequest(
       body?.dimension;
     const distance = vectors?.distance ?? vectors?.params?.distance ?? body?.distance;
     if (!Number.isFinite(size)) {
-      return sendJson(res, 400, { status: { error: "missing vector size" } });
+      return json(400, { status: { error: "missing vector size" } });
     }
 
     try {
       await store.createCollection(collectionName, { size, distance });
-      return sendJson(res, 200, { result: true, status: "ok", time: 0 });
+      return json(200, { result: true, status: "ok", time: 0 });
     } catch (error) {
-      return sendJson(res, 400, {
+      return json(400, {
         status: { error: error instanceof Error ? error.message : String(error) },
       });
     }
@@ -208,19 +275,19 @@ async function handleRequest(
 
   if (req.method === "DELETE" && remainder === "") {
     await store.deleteCollection(collectionName);
-    return sendJson(res, 200, { result: true, status: "ok", time: 0 });
+    return json(200, { result: true, status: "ok", time: 0 });
   }
 
   if (req.method === "PUT" && remainder === "/points") {
-    const body = await readJsonBody(req);
+    const body = requestLog.reqBody as any;
     const points = Array.isArray(body?.points) ? body.points : null;
     if (!points) {
-      return sendJson(res, 400, { status: { error: "missing points[]" } });
+      return json(400, { status: { error: "missing points[]" } });
     }
 
     for (const point of points) {
       if (!("id" in point) || !Array.isArray(point.vector)) {
-        return sendJson(res, 400, {
+        return json(400, {
           status: { error: "each point must include id and vector" },
         });
       }
@@ -229,7 +296,7 @@ async function handleRequest(
           (value: unknown) => value == null || !Number.isFinite(value as number)
         )
       ) {
-        return sendJson(res, 400, {
+        return json(400, {
           status: { error: "vectors must contain finite numbers" },
         });
       }
@@ -237,20 +304,20 @@ async function handleRequest(
 
     try {
       await store.upsertPoints(collectionName, points);
-      return sendJson(res, 200, {
+      return json(200, {
         result: { operation_id: 0, status: "completed" },
         status: "ok",
         time: 0,
       });
     } catch (error) {
-      return sendJson(res, 400, {
+      return json(400, {
         status: { error: error instanceof Error ? error.message : String(error) },
       });
     }
   }
 
   if (req.method === "POST" && remainder === "/points/query") {
-    const body = await readJsonBody(req);
+    const body = requestLog.reqBody as any;
     const vector =
       body?.query?.vector ??
       body?.vector ??
@@ -262,7 +329,7 @@ async function handleRequest(
     );
 
     if (!Array.isArray(vector)) {
-      return sendJson(res, 400, { status: { error: "missing query vector" } });
+      return json(400, { status: { error: "missing query vector" } });
     }
 
     try {
@@ -270,16 +337,16 @@ async function handleRequest(
         limit: Number.isFinite(limit) ? limit : 20,
         scoreThreshold: Number.isFinite(scoreThreshold) ? scoreThreshold : 0,
       });
-      return sendJson(res, 200, { result: results, status: "ok", time: 0 });
+      return json(200, { result: results, status: "ok", time: 0 });
     } catch (error) {
-      return sendJson(res, 400, {
+      return json(400, {
         status: { error: error instanceof Error ? error.message : String(error) },
       });
     }
   }
 
   if (req.method === "POST" && remainder === "/points/delete") {
-    const body = await readJsonBody(req);
+    const body = requestLog.reqBody as any;
     const pointIds = body?.points;
     const filter = body?.filter;
 
@@ -288,7 +355,7 @@ async function handleRequest(
     // points before collections are created (e.g., RooCode's QdrantVectorStore)
     const collection = await store.getCollection(collectionName);
     if (!collection) {
-      return sendJson(res, 200, {
+      return json(200, {
         result: { operation_id: 0, status: "completed" },
         status: "ok",
         time: 0,
@@ -371,18 +438,18 @@ async function handleRequest(
         };
         deletedCount = await store.deletePoints(collectionName, undefined, filterFn);
       } else {
-        return sendJson(res, 400, {
+        return json(400, {
           status: { error: "missing points[] or filter" },
         });
       }
 
-      return sendJson(res, 200, {
+      return json(200, {
         result: { operation_id: 0, status: "completed" },
         status: "ok",
         time: 0,
       });
     } catch (error) {
-      return sendJson(res, 400, {
+      return json(400, {
         status: { error: error instanceof Error ? error.message : String(error) },
       });
     }
@@ -392,19 +459,19 @@ async function handleRequest(
   if (req.method === "POST" && remainder === "/compact") {
     try {
       const count = await store.compactCollection(collectionName);
-      return sendJson(res, 200, {
+      return json(200, {
         result: { unique_points: count },
         status: "ok",
         time: 0,
       });
     } catch (error) {
-      return sendJson(res, 400, {
+      return json(400, {
         status: { error: error instanceof Error ? error.message : String(error) },
       });
     }
   }
 
-  return sendJson(res, 404, {
+  return json(404, {
     status: { error: "not found" },
     method: req.method ?? "",
     path,
@@ -413,7 +480,16 @@ async function handleRequest(
   });
 }
 
-function sendJson(res: http.ServerResponse, status: number, payload: unknown) {
+function sendJson(
+  res: http.ServerResponse,
+  status: number,
+  payload: unknown,
+  requestLog?: HttpRequestLog
+) {
+  if (requestLog) {
+    requestLog.status = status;
+    requestLog.resBody = payload;
+  }
   const body = JSON.stringify(payload ?? {});
   res.writeHead(status, {
     "content-type": "application/json",

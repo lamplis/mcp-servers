@@ -1,3 +1,5 @@
+import { parseLogLevel, parseRetentionDays, type LogLevel } from "./logger.js";
+
 export type EmbeddingProviderMode = "local" | "external";
 
 export interface FakeQdrantConfig {
@@ -5,6 +7,9 @@ export interface FakeQdrantConfig {
   httpHost: string;
   httpPort: number;
   dataDir: string;
+  logDir: string | null;
+  logLevel: LogLevel;
+  logRetentionDays: number;
   embeddingProvider: EmbeddingProviderMode;
   embeddingBaseUrl: string | null;
   embeddingModel: string | null;
@@ -34,6 +39,9 @@ export function loadConfig(
     httpHost: env.FAKE_QDRANT_HTTP_HOST ?? "127.0.0.1",
     httpPort: parsePort(env.FAKE_QDRANT_HTTP_PORT, 6333),
     dataDir: env.FAKE_QDRANT_DATA_DIR ?? "./data/fake-qdrant",
+    logDir: env.FAKE_QDRANT_LOG_DIR ?? null,
+    logLevel: parseLogLevel(env.FAKE_QDRANT_LOG_LEVEL),
+    logRetentionDays: parseRetentionDays(env.FAKE_QDRANT_LOG_RETENTION_DAYS),
     embeddingProvider: provider,
     embeddingBaseUrl,
     embeddingModel,

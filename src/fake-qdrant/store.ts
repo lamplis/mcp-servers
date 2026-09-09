@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import type { Logger } from "./logger.js";
 
 export type DistanceMetric = "Cosine";
 
@@ -27,6 +28,7 @@ export interface QueryOptions {
 
 export interface StoreOptions {
   dataDir?: string;
+  logger?: Logger;
 }
 
 const DEFAULT_DATA_DIR = path.join(
@@ -58,12 +60,15 @@ export class Store {
   static async create(options: StoreOptions = {}): Promise<Store> {
     const baseDir = resolveDataDir(options.dataDir);
     await fs.mkdir(baseDir, { recursive: true });
-    const store = new Store(baseDir);
+    const store = new Store(baseDir, options.logger);
     await store.warnLeftoverSqliteFiles();
     return store;
   }
 
-  private constructor(private readonly baseDir: string) {}
+  private constructor(
+    private readonly baseDir: string,
+    private readonly logger?: Logger
+  ) {}
 
   get directory(): string {
     return this.baseDir;
@@ -87,10 +92,14 @@ export class Store {
       .catch(() => []);
     for (const entry of entries) {
       if (entry.isFile() && entry.name.endsWith(".db")) {
-        console.error(
-          `[fake-qdrant] Ignoring leftover SQLite file "${entry.name}". ` +
-            "JSONL is the native format; re-upsert points (SQLite cannot be opened on this workstation)."
-        );
+        const message =
+          `Ignoring leftover SQLite file "${entry.name}". ` +
+          "JSONL is the native format; re-upsert points (SQLite cannot be opened on this workstation).";
+        if (this.logger) {
+          this.logger.warn("store.leftover_sqlite", { file: entry.name, message });
+        } else {
+          console.error(`[fake-qdrant] ${message}`);
+        }
       }
     }
   }

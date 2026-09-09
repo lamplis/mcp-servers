@@ -10,6 +10,7 @@ Fake Qdrant implements a subset of the Qdrant vector database API, offering:
 - **HTTP API Shim** - Qdrant-compatible REST API on port 6333 (optional)
 - **JSONL Vector Search** - Brute-force cosine similarity in pure JavaScript (no database binaries)
 - **Persistent Storage** - Data persisted as `meta.json` + `points.jsonl` per collection
+- **Daily file logs** - JSONL logs under `{dataDir}/logs/YYYY-MM-DD.log`, kept for 3 days
 - **Zero External Services** - Node.js implementation, no Docker, SQLite, or Qdrant binary
 
 ## Architecture
@@ -213,6 +214,9 @@ Add to `.cursor/mcp.json`:
 | `FAKE_QDRANT_HTTP_PORT` | `6333` | HTTP server port |
 | `FAKE_QDRANT_HTTP_HOST` | `127.0.0.1` | HTTP server bind address |
 | `FAKE_QDRANT_DATA_DIR` | `./data/fake-qdrant` | Directory for JSONL collections (`meta.json` + `points.jsonl`) |
+| `FAKE_QDRANT_LOG_DIR` | `{dataDir}/logs` | Directory for daily JSONL debug logs |
+| `FAKE_QDRANT_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` |
+| `FAKE_QDRANT_LOG_RETENTION_DAYS` | `3` | Keep this many local calendar days of log files |
 
 ## Usage Examples
 
@@ -273,6 +277,16 @@ curl -X POST "http://localhost:6333/collections/documents/points/delete" \
 ```
 
 ## Troubleshooting
+
+### Where to find logs after a RooCode / VS Code error
+
+MCP stdio output is not retained by the IDE. Open the daily file log instead:
+
+```powershell
+Get-Content ".\data\fake-qdrant\logs\$(Get-Date -Format yyyy-MM-dd).log" -Tail 80
+```
+
+Each line is one JSON object (`event`, `level`, `fields`). HTTP requests from RooCode's Qdrant client show up as `http.request` (vectors are redacted). MCP tool calls show up as `mcp.tool`. Warn and error lines are also mirrored to stderr. Files older than 3 local days are deleted on startup and at midnight rollover.
 
 ### Port 6333 Already in Use
 
@@ -455,6 +469,8 @@ JSONL is the native format (one directory per collection):
 data/fake-qdrant/{collection}/
   meta.json
   points.jsonl
+data/fake-qdrant/logs/
+  YYYY-MM-DD.log
 ```
 
 Leftover `{name}.db` SQLite files cannot be converted on locked-down workstations (database binaries are blocked). Re-upsert points instead:

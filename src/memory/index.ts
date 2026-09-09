@@ -6,15 +6,67 @@ import {
   defaultMemoryPath,
   ensureMemoryFilePath,
   KnowledgeGraphManager,
+  resolveMemoryFilePathFromEnv,
+  resolveMemoryLogConfig,
 } from "./server.js";
+import { createFileLogger } from "./logger.js";
 
-export { defaultMemoryPath, ensureMemoryFilePath, KnowledgeGraphManager };
+export {
+  defaultMemoryPath,
+  ensureMemoryFilePath,
+  KnowledgeGraphManager,
+  resolveMemoryFilePathFromEnv,
+  resolveMemoryLogConfig,
+};
 
 async function main() {
-  const { server } = await createServer();
+  const memoryFilePath = resolveMemoryFilePathFromEnv();
+  const logConfig = resolveMemoryLogConfig(memoryFilePath);
+  const logger = createFileLogger({
+    logDir: logConfig.logDir,
+    level: logConfig.level,
+    retentionDays: logConfig.retentionDays,
+    redactVectors: false,
+  });
+
+  logger.info("lifecycle.start", {
+    pid: process.pid,
+    cwd: process.cwd(),
+    node: process.version,
+    memoryFilePath,
+    logDir: logger.logDir,
+    logFile: logger.currentFilePath(),
+  });
+  console.error(
+    `Knowledge Graph MCP Server running on stdio; logs: ${logger.currentFilePath()}`
+  );
+
+  const { server, cleanup } = await createServer({ logger });
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("Knowledge Graph MCP Server running on stdio");
+
+  const shutdown = async () => {
+    logger.info("lifecycle.shutdown", {});
+    await server.close();
+    cleanup();
+    logger.close();
+    process.exit(0);
+  };
+
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+  process.on("uncaughtException", (error) => {
+    logger.error("process.uncaughtException", {
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+    });
+  });
+  process.on("unhandledRejection", (reason) => {
+    logger.error("process.unhandledRejection", {
+      error: reason instanceof Error ? reason.message : String(reason),
+      stack: reason instanceof Error ? reason.stack : undefined,
+    });
+  });
 }
 
 main().catch((error) => {
