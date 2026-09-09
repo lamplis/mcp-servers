@@ -9,6 +9,22 @@ import {
   type Logger,
   type LogLevel,
 } from "./logger.js";
+import type { DiskGate } from "./disk-gate.js";
+import {
+  KnowledgeGraphManager,
+  type Entity,
+  type Relation,
+  type KnowledgeGraph,
+  type KnowledgeGraphManagerOptions,
+} from "./knowledge-graph.js";
+
+export {
+  KnowledgeGraphManager,
+  type Entity,
+  type Relation,
+  type KnowledgeGraph,
+  type KnowledgeGraphManagerOptions,
+};
 
 export const defaultMemoryPath = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -87,228 +103,6 @@ export async function ensureMemoryFilePath(
     }
   } catch {
     return newMemoryPath;
-  }
-}
-
-export interface Entity {
-  name: string;
-  entityType: string;
-  observations: string[];
-}
-
-export interface Relation {
-  from: string;
-  to: string;
-  relationType: string;
-}
-
-export interface KnowledgeGraph {
-  entities: Entity[];
-  relations: Relation[];
-}
-
-export class KnowledgeGraphManager {
-  constructor(
-    private memoryFilePath: string,
-    private logger?: Logger
-  ) {}
-
-  private async loadGraph(): Promise<KnowledgeGraph> {
-    try {
-      const data = await fs.readFile(this.memoryFilePath, "utf-8");
-      const lines = data.split("\n").filter((line) => line.trim() !== "");
-      return lines.reduce(
-        (graph: KnowledgeGraph, line, index) => {
-          try {
-            const item = JSON.parse(line);
-            if (item.type === "entity") graph.entities.push(item as Entity);
-            if (item.type === "relation") graph.relations.push(item as Relation);
-            return graph;
-          } catch (error) {
-            this.logger?.error("memory.jsonl.parse", {
-              line: index + 1,
-              error: error instanceof Error ? error.message : String(error),
-            });
-            throw error;
-          }
-        },
-        { entities: [], relations: [] }
-      );
-    } catch (error) {
-      if (
-        error instanceof Error &&
-        "code" in error &&
-        (error as any).code === "ENOENT"
-      ) {
-        return { entities: [], relations: [] };
-      }
-      throw error;
-    }
-  }
-
-  private async saveGraph(graph: KnowledgeGraph): Promise<void> {
-    const lines = [
-      ...graph.entities.map((e) =>
-        JSON.stringify({
-          type: "entity",
-          name: e.name,
-          entityType: e.entityType,
-          observations: e.observations,
-        })
-      ),
-      ...graph.relations.map((r) =>
-        JSON.stringify({
-          type: "relation",
-          from: r.from,
-          to: r.to,
-          relationType: r.relationType,
-        })
-      ),
-    ];
-    await fs.writeFile(this.memoryFilePath, lines.join("\n"));
-  }
-
-  async createEntities(entities: Entity[]): Promise<Entity[]> {
-    const graph = await this.loadGraph();
-    const newEntities = entities.filter(
-      (entity) =>
-        !graph.entities.some(
-          (existingEntity) => existingEntity.name === entity.name
-        )
-    );
-    graph.entities.push(...newEntities);
-    await this.saveGraph(graph);
-    return newEntities;
-  }
-
-  async createRelations(relations: Relation[]): Promise<Relation[]> {
-    const graph = await this.loadGraph();
-    const newRelations = relations.filter(
-      (relation) =>
-        !graph.relations.some(
-          (existingRelation) =>
-            existingRelation.from === relation.from &&
-            existingRelation.to === relation.to &&
-            existingRelation.relationType === relation.relationType
-        )
-    );
-    graph.relations.push(...newRelations);
-    await this.saveGraph(graph);
-    return newRelations;
-  }
-
-  async addObservations(
-    observations: { entityName: string; contents: string[] }[]
-  ): Promise<{ entityName: string; addedObservations: string[] }[]> {
-    const graph = await this.loadGraph();
-    const results = observations.map((observation) => {
-      const entity = graph.entities.find(
-        (existingEntity) => existingEntity.name === observation.entityName
-      );
-      if (!entity) {
-        throw new Error(
-          `Entity with name ${observation.entityName} not found`
-        );
-      }
-      const newObservations = observation.contents.filter(
-        (content) => !entity.observations.includes(content)
-      );
-      entity.observations.push(...newObservations);
-      return { entityName: observation.entityName, addedObservations: newObservations };
-    });
-    await this.saveGraph(graph);
-    return results;
-  }
-
-  async deleteEntities(entityNames: string[]): Promise<void> {
-    const graph = await this.loadGraph();
-    graph.entities = graph.entities.filter(
-      (entity) => !entityNames.includes(entity.name)
-    );
-    graph.relations = graph.relations.filter(
-      (relation) =>
-        !entityNames.includes(relation.from) &&
-        !entityNames.includes(relation.to)
-    );
-    await this.saveGraph(graph);
-  }
-
-  async deleteObservations(
-    deletions: { entityName: string; observations: string[] }[]
-  ): Promise<void> {
-    const graph = await this.loadGraph();
-    deletions.forEach((deletion) => {
-      const entity = graph.entities.find(
-        (existingEntity) => existingEntity.name === deletion.entityName
-      );
-      if (entity) {
-        entity.observations = entity.observations.filter(
-          (observation) => !deletion.observations.includes(observation)
-        );
-      }
-    });
-    await this.saveGraph(graph);
-  }
-
-  async deleteRelations(relations: Relation[]): Promise<void> {
-    const graph = await this.loadGraph();
-    graph.relations = graph.relations.filter(
-      (relation) =>
-        !relations.some(
-          (deletion) =>
-            relation.from === deletion.from &&
-            relation.to === deletion.to &&
-            relation.relationType === deletion.relationType
-        )
-    );
-    await this.saveGraph(graph);
-  }
-
-  async readGraph(): Promise<KnowledgeGraph> {
-    return this.loadGraph();
-  }
-
-  async searchNodes(query: string): Promise<KnowledgeGraph> {
-    const graph = await this.loadGraph();
-    const filteredEntities = graph.entities.filter(
-      (entity) =>
-        entity.name.toLowerCase().includes(query.toLowerCase()) ||
-        entity.entityType.toLowerCase().includes(query.toLowerCase()) ||
-        entity.observations.some((observation) =>
-          observation.toLowerCase().includes(query.toLowerCase())
-        )
-    );
-
-    const filteredEntityNames = new Set(filteredEntities.map((entity) => entity.name));
-    const filteredRelations = graph.relations.filter(
-      (relation) =>
-        filteredEntityNames.has(relation.from) &&
-        filteredEntityNames.has(relation.to)
-    );
-
-    return {
-      entities: filteredEntities,
-      relations: filteredRelations,
-    };
-  }
-
-  async openNodes(names: string[]): Promise<KnowledgeGraph> {
-    const graph = await this.loadGraph();
-    const filteredEntities = graph.entities.filter((entity) =>
-      names.includes(entity.name)
-    );
-
-    const filteredEntityNames = new Set(filteredEntities.map((entity) => entity.name));
-    const filteredRelations = graph.relations.filter(
-      (relation) =>
-        filteredEntityNames.has(relation.from) &&
-        filteredEntityNames.has(relation.to)
-    );
-
-    return {
-      entities: filteredEntities,
-      relations: filteredRelations,
-    };
   }
 }
 
@@ -718,20 +512,26 @@ function registerTools(
 
 export type MemoryServerFactoryOptions = {
   logger?: Logger;
+  diskGate?: DiskGate;
+  acquireLock?: boolean;
 };
 
 export type MemoryServerFactoryResponse = {
   server: McpServer;
-  cleanup: (sessionId?: string) => void;
+  cleanup: (sessionId?: string) => void | Promise<void>;
 };
 
 export async function createServer(
   options: MemoryServerFactoryOptions = {}
 ): Promise<MemoryServerFactoryResponse> {
   const memoryFilePath = await ensureMemoryFilePath(options.logger);
-  const knowledgeGraphManager = new KnowledgeGraphManager(
+  const knowledgeGraphManager = await KnowledgeGraphManager.create(
     memoryFilePath,
-    options.logger
+    {
+      logger: options.logger,
+      diskGate: options.diskGate,
+      acquireLock: options.acquireLock,
+    }
   );
   const server = new McpServer({
     name: "memory-server",
@@ -742,9 +542,7 @@ export async function createServer(
 
   return {
     server,
-    cleanup: () => {
-      // No background tasks to clean up for this server at the moment.
-    },
+    cleanup: () => knowledgeGraphManager.close(),
   };
 }
 

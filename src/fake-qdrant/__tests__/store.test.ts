@@ -17,7 +17,7 @@ describe("Fake Qdrant JSONL store", () => {
   });
 
   afterEach(async () => {
-    store.close();
+    await store.close();
     await fs.rm(testDataDir, { recursive: true, force: true }).catch(() => undefined);
   });
 
@@ -64,13 +64,13 @@ describe("Fake Qdrant JSONL store", () => {
     const unique = await store.compactCollection("dupes");
     expect(unique).toBe(1);
 
-    store.close();
+    await store.close();
     const reloaded = await Store.create({ dataDir: testDataDir });
     const info = await reloaded.getCollection("dupes");
     expect(info?.vectors.size).toBe(2);
     const results = await reloaded.query("dupes", [0, 1], { limit: 1 });
     expect(results[0]?.payload).toEqual({ v: 2 });
-    reloaded.close();
+    await reloaded.close();
   });
 
   it("persists dirty collections to disk", async () => {

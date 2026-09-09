@@ -6,16 +6,19 @@ import { loadConfig } from "./config.js";
 import { createServer } from "./server.js";
 import { startQdrantHttpServer, type QdrantHttpServerHandle } from "./qdrant-http.js";
 import { createFileLogger } from "./logger.js";
+import { DiskGate } from "./disk-gate.js";
 
 async function main() {
   const config = loadConfig();
   const dataDir = path.resolve(config.dataDir);
   const logDir = path.resolve(config.logDir ?? path.join(dataDir, "logs"));
+  const diskGate = new DiskGate();
   const logger = createFileLogger({
     logDir,
     level: config.logLevel,
     retentionDays: config.logRetentionDays,
     redactVectors: true,
+    diskGate,
   });
 
   logger.info("lifecycle.start", {
@@ -36,6 +39,7 @@ async function main() {
   const { server, store } = await createServer({
     dataDir: config.dataDir,
     logger,
+    diskGate,
   });
   const transport = new StdioServerTransport();
   await server.connect(transport);
@@ -80,8 +84,9 @@ async function main() {
     if (httpHandle) {
       await httpHandle.close().catch(() => {});
     }
-    store.close();
+    await store.close();
     await server.close();
+    await logger.flush();
     logger.close();
     process.exit(0);
   };

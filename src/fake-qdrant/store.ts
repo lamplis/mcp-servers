@@ -2,6 +2,15 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Logger } from "./logger.js";
+import {
+  DiskGate,
+  Mutex,
+  ProcessLockBusyError,
+  acquireProcessLock,
+  atomicWriteFile,
+  lockDirForDataDir,
+  type ProcessLock,
+} from "./disk-gate.js";
 
 export type DistanceMetric = "Cosine";
 
@@ -29,7 +38,15 @@ export interface QueryOptions {
 export interface StoreOptions {
   dataDir?: string;
   logger?: Logger;
+  diskGate?: DiskGate;
+  acquireLock?: boolean;
+  lockRetries?: number;
+  lockRetryMs?: number;
 }
+
+export const AUTO_COMPACT_MULTIPLIER = 2;
+export const AUTO_COMPACT_EXTRA_LINES = 500;
+export const QUERY_YIELD_EVERY = 256;
 
 const DEFAULT_DATA_DIR = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -47,6 +64,7 @@ interface LoadedCollection {
   meta: CollectionMeta;
   points: Map<string, PointRecord>;
   dirty: boolean;
+  jsonlLines: number;
 }
 
 /**
@@ -55,23 +73,66 @@ interface LoadedCollection {
  */
 export class Store {
   private collections: Map<string, LoadedCollection> = new Map();
-  private writeLocks: Map<string, Promise<void>> = new Map();
+  private collectionLocks: Map<string, Mutex> = new Map();
+  private readonly diskGate: DiskGate;
+  private processLock: ProcessLock | null = null;
+  private busy = false;
+  private busyError: ProcessLockBusyError | null = null;
 
   static async create(options: StoreOptions = {}): Promise<Store> {
     const baseDir = resolveDataDir(options.dataDir);
     await fs.mkdir(baseDir, { recursive: true });
-    const store = new Store(baseDir, options.logger);
+    const diskGate = options.diskGate ?? new DiskGate();
+    const store = new Store(baseDir, options.logger, diskGate);
+    if (options.acquireLock !== false) {
+      try {
+        store.processLock = await acquireProcessLock({
+          lockDir: lockDirForDataDir(baseDir),
+          retries: options.lockRetries,
+          retryMs: options.lockRetryMs,
+        });
+      } catch (error) {
+        if (error instanceof ProcessLockBusyError) {
+          store.busy = true;
+          store.busyError = error;
+          options.logger?.error("store.busy", {
+            lockDir: lockDirForDataDir(baseDir),
+            holderPid: error.holderPid,
+            message: error.message,
+          });
+        } else {
+          throw error;
+        }
+      }
+    }
     await store.warnLeftoverSqliteFiles();
     return store;
   }
 
   private constructor(
     private readonly baseDir: string,
-    private readonly logger?: Logger
-  ) {}
+    private readonly logger: Logger | undefined,
+    diskGate: DiskGate
+  ) {
+    this.diskGate = diskGate;
+  }
 
   get directory(): string {
     return this.baseDir;
+  }
+
+  get diskWriter(): DiskGate {
+    return this.diskGate;
+  }
+
+  get isBusy(): boolean {
+    return this.busy;
+  }
+
+  assertWritable(): void {
+    if (this.busy && this.busyError) {
+      throw this.busyError;
+    }
   }
 
   private collectionDir(name: string): string {
@@ -84,6 +145,15 @@ export class Store {
 
   private pointsPath(name: string): string {
     return path.join(this.collectionDir(name), "points.jsonl");
+  }
+
+  private mutexFor(name: string): Mutex {
+    let mutex = this.collectionLocks.get(name);
+    if (!mutex) {
+      mutex = new Mutex();
+      this.collectionLocks.set(name, mutex);
+    }
+    return mutex;
   }
 
   private async warnLeftoverSqliteFiles(): Promise<void> {
@@ -104,25 +174,9 @@ export class Store {
     }
   }
 
-  private async withWriteLock(name: string, fn: () => Promise<void>): Promise<void> {
-    const previous = this.writeLocks.get(name) ?? Promise.resolve();
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    this.writeLocks.set(
-      name,
-      previous.then(() => gate).catch(() => gate)
-    );
-    await previous.catch(() => undefined);
-    try {
-      await fn();
-    } finally {
-      release();
-    }
-  }
-
-  private async loadCollection(name: string): Promise<LoadedCollection | null> {
+  private async loadCollectionUnlocked(
+    name: string
+  ): Promise<LoadedCollection | null> {
     const cached = this.collections.get(name);
     if (cached) {
       return cached;
@@ -153,12 +207,14 @@ export class Store {
     );
 
     const points = new Map<string, PointRecord>();
+    let jsonlLines = 0;
     try {
       const content = await fs.readFile(this.pointsPath(name), "utf8");
       for (const line of content.split("\n")) {
         if (!line.trim()) {
           continue;
         }
+        jsonlLines += 1;
         try {
           const record = JSON.parse(line) as PointRecord;
           if (!isValidPointId(record.id) || !Array.isArray(record.vector)) {
@@ -178,35 +234,33 @@ export class Store {
       meta: { size, distance },
       points,
       dirty: false,
+      jsonlLines,
     };
     this.collections.set(name, loaded);
     return loaded;
   }
 
   private async writeMeta(name: string, meta: CollectionMeta): Promise<void> {
-    await fs.mkdir(this.collectionDir(name), { recursive: true });
-    const tmp = `${this.metaPath(name)}.tmp`;
-    await fs.writeFile(tmp, `${JSON.stringify(meta, null, 2)}\n`, "utf8");
-    await fs.rename(tmp, this.metaPath(name)).catch(async () => {
-      await fs.rm(this.metaPath(name), { force: true }).catch(() => undefined);
-      await fs.rename(tmp, this.metaPath(name));
+    await this.diskGate.run(async () => {
+      await fs.mkdir(this.collectionDir(name), { recursive: true });
+      await atomicWriteFile(
+        this.metaPath(name),
+        `${JSON.stringify(meta, null, 2)}\n`
+      );
     });
   }
 
   private async rewritePoints(loaded: LoadedCollection): Promise<void> {
-    await fs.mkdir(this.collectionDir(loaded.name), { recursive: true });
-    const dest = this.pointsPath(loaded.name);
-    const tmp = `${dest}.tmp`;
-    const lines: string[] = [];
-    for (const point of loaded.points.values()) {
-      lines.push(JSON.stringify(point));
-    }
-    const body = lines.length > 0 ? `${lines.join("\n")}\n` : "";
-    await fs.writeFile(tmp, body, "utf8");
-    await fs.rename(tmp, dest).catch(async () => {
-      await fs.rm(dest, { force: true }).catch(() => undefined);
-      await fs.rename(tmp, dest);
+    await this.diskGate.run(async () => {
+      await fs.mkdir(this.collectionDir(loaded.name), { recursive: true });
+      const lines: string[] = [];
+      for (const point of loaded.points.values()) {
+        lines.push(JSON.stringify(point));
+      }
+      const body = lines.length > 0 ? `${lines.join("\n")}\n` : "";
+      await atomicWriteFile(this.pointsPath(loaded.name), body);
     });
+    loaded.jsonlLines = loaded.points.size;
     loaded.dirty = false;
   }
 
@@ -214,15 +268,26 @@ export class Store {
     name: string,
     points: PointRecord[]
   ): Promise<void> {
-    await fs.mkdir(this.collectionDir(name), { recursive: true });
     const payload = points.map((point) => JSON.stringify(point)).join("\n");
     if (!payload) {
       return;
     }
-    await fs.appendFile(this.pointsPath(name), `${payload}\n`, "utf8");
+    await this.diskGate.run(async () => {
+      await fs.mkdir(this.collectionDir(name), { recursive: true });
+      await fs.appendFile(this.pointsPath(name), `${payload}\n`, "utf8");
+    });
+  }
+
+  private shouldAutoCompact(loaded: LoadedCollection): boolean {
+    const unique = loaded.points.size;
+    return (
+      loaded.jsonlLines > unique * AUTO_COMPACT_MULTIPLIER ||
+      loaded.jsonlLines > unique + AUTO_COMPACT_EXTRA_LINES
+    );
   }
 
   async listCollections(): Promise<CollectionInfo[]> {
+    this.assertWritable();
     const entries = await fs
       .readdir(this.baseDir, { withFileTypes: true })
       .catch((error) => {
@@ -234,7 +299,7 @@ export class Store {
 
     const result: CollectionInfo[] = [];
     for (const entry of entries) {
-      if (!entry.isDirectory()) {
+      if (!entry.isDirectory() || entry.name.startsWith(".")) {
         continue;
       }
       const info = await this.getCollection(entry.name);
@@ -246,47 +311,71 @@ export class Store {
   }
 
   async getCollection(name: string): Promise<CollectionInfo | null> {
-    const loaded = await this.loadCollection(name);
-    if (!loaded) {
-      return null;
-    }
-    return {
-      name,
-      vectors: { ...loaded.meta },
-    };
+    this.assertWritable();
+    return this.mutexFor(name).run(async () => {
+      const loaded = await this.loadCollectionUnlocked(name);
+      if (!loaded) {
+        return null;
+      }
+      return {
+        name,
+        vectors: { ...loaded.meta },
+      };
+    });
   }
 
   async createCollection(
     name: string,
     meta: { size: number; distance?: string }
   ): Promise<CollectionInfo> {
+    this.assertWritable();
     const size = meta.size;
     if (!Number.isInteger(size) || size <= 0) {
       throw new Error("Collection size must be a positive integer");
     }
 
     const distance = normalizeDistance(meta.distance);
-    await this.deleteCollection(name);
+    return this.mutexFor(name).run(async () => {
+      await this.deleteCollectionUnlocked(name);
 
-    const loaded: LoadedCollection = {
-      name,
-      meta: { size, distance },
-      points: new Map(),
-      dirty: false,
-    };
-    this.collections.set(name, loaded);
-    await this.writeMeta(name, loaded.meta);
-    await fs.writeFile(this.pointsPath(name), "", "utf8");
+      const loaded: LoadedCollection = {
+        name,
+        meta: { size, distance },
+        points: new Map(),
+        dirty: false,
+        jsonlLines: 0,
+      };
+      this.collections.set(name, loaded);
+      await this.writeMeta(name, loaded.meta);
+      await this.diskGate.run(async () => {
+        await atomicWriteFile(this.pointsPath(name), "");
+      });
 
-    return { name, vectors: { size, distance } };
+      return { name, vectors: { size, distance } };
+    });
   }
 
   async deleteCollection(name: string): Promise<void> {
+    this.assertWritable();
+    await this.mutexFor(name).run(async () => {
+      await this.deleteCollectionUnlocked(name);
+    });
+  }
+
+  private async deleteCollectionUnlocked(name: string): Promise<void> {
     this.collections.delete(name);
-    await fs.rm(this.collectionDir(name), { recursive: true, force: true }).catch(() => undefined);
-    await fs.rm(path.join(this.baseDir, `${name}.db`), { force: true }).catch(() => undefined);
-    await fs.rm(path.join(this.baseDir, `${name}.db-wal`), { force: true }).catch(() => undefined);
-    await fs.rm(path.join(this.baseDir, `${name}.db-shm`), { force: true }).catch(() => undefined);
+    await this.diskGate.run(async () => {
+      await fs
+        .rm(this.collectionDir(name), { recursive: true, force: true })
+        .catch(() => undefined);
+      await fs.rm(path.join(this.baseDir, `${name}.db`), { force: true }).catch(() => undefined);
+      await fs
+        .rm(path.join(this.baseDir, `${name}.db-wal`), { force: true })
+        .catch(() => undefined);
+      await fs
+        .rm(path.join(this.baseDir, `${name}.db-shm`), { force: true })
+        .catch(() => undefined);
+    });
   }
 
   /**
@@ -297,64 +386,67 @@ export class Store {
     pointIds?: (string | number)[],
     filter?: (payload: unknown) => boolean
   ): Promise<number> {
-    const loaded = await this.loadCollection(name);
-    if (!loaded) {
-      return 0;
-    }
-
-    const toDelete = new Set<string>();
-    if (pointIds && pointIds.length > 0) {
-      for (const id of pointIds) {
-        toDelete.add(String(id));
+    this.assertWritable();
+    return this.mutexFor(name).run(async () => {
+      const loaded = await this.loadCollectionUnlocked(name);
+      if (!loaded) {
+        return 0;
       }
-    }
-    if (filter) {
-      for (const [key, point] of loaded.points) {
-        if (filter(point.payload ?? null)) {
-          toDelete.add(key);
+
+      const toDelete = new Set<string>();
+      if (pointIds && pointIds.length > 0) {
+        for (const id of pointIds) {
+          toDelete.add(String(id));
         }
       }
-    }
-
-    let deletedCount = 0;
-    for (const key of toDelete) {
-      if (loaded.points.delete(key)) {
-        deletedCount += 1;
+      if (filter) {
+        for (const [key, point] of loaded.points) {
+          if (filter(point.payload ?? null)) {
+            toDelete.add(key);
+          }
+        }
       }
-    }
 
-    if (deletedCount > 0) {
-      await this.withWriteLock(name, async () => {
+      let deletedCount = 0;
+      for (const key of toDelete) {
+        if (loaded.points.delete(key)) {
+          deletedCount += 1;
+        }
+      }
+
+      if (deletedCount > 0) {
+        loaded.dirty = true;
         await this.rewritePoints(loaded);
-      });
-    }
+      }
 
-    return deletedCount;
+      return deletedCount;
+    });
   }
 
   async upsertPoints(name: string, points: PointRecord[]): Promise<void> {
-    const loaded = await this.loadCollection(name);
-    if (!loaded) {
-      throw new Error(`Collection not found: ${name}`);
-    }
-
-    const dimension = loaded.meta.size;
-    for (const point of points) {
-      if (!isValidPointId(point.id)) {
-        throw new Error("Point id must be a string or number");
+    this.assertWritable();
+    await this.mutexFor(name).run(async () => {
+      const loaded = await this.loadCollectionUnlocked(name);
+      if (!loaded) {
+        throw new Error(`Collection not found: ${name}`);
       }
-      if (
-        !Array.isArray(point.vector) ||
-        point.vector.length !== dimension ||
-        point.vector.some((value) => !Number.isFinite(value))
-      ) {
-        throw new Error(
-          `Vector must contain ${dimension} finite numbers for collection ${name}`
-        );
-      }
-    }
 
-    await this.withWriteLock(name, async () => {
+      const dimension = loaded.meta.size;
+      for (const point of points) {
+        if (!isValidPointId(point.id)) {
+          throw new Error("Point id must be a string or number");
+        }
+        if (
+          !Array.isArray(point.vector) ||
+          point.vector.length !== dimension ||
+          point.vector.some((value) => !Number.isFinite(value))
+        ) {
+          throw new Error(
+            `Vector must contain ${dimension} finite numbers for collection ${name}`
+          );
+        }
+      }
+
       for (const point of points) {
         loaded.points.set(String(point.id), {
           id: point.id,
@@ -364,32 +456,48 @@ export class Store {
       }
       loaded.dirty = true;
       await this.appendPoints(name, points);
+      loaded.jsonlLines += points.length;
+      if (this.shouldAutoCompact(loaded)) {
+        await this.rewritePoints(loaded);
+      }
     });
   }
 
   async query(name: string, queryVector: number[], options: QueryOptions = {}) {
-    const loaded = await this.loadCollection(name);
-    if (!loaded) {
-      throw new Error(`Collection not found: ${name}`);
-    }
+    this.assertWritable();
+    const snapshot = await this.mutexFor(name).run(async () => {
+      const loaded = await this.loadCollectionUnlocked(name);
+      if (!loaded) {
+        throw new Error(`Collection not found: ${name}`);
+      }
 
-    const dimension = loaded.meta.size;
-    if (
-      !Array.isArray(queryVector) ||
-      queryVector.length !== dimension ||
-      queryVector.some((value) => !Number.isFinite(value))
-    ) {
-      throw new Error(
-        `Query vector must contain ${dimension} finite numbers for collection ${name}`
-      );
-    }
+      const dimension = loaded.meta.size;
+      if (
+        !Array.isArray(queryVector) ||
+        queryVector.length !== dimension ||
+        queryVector.some((value) => !Number.isFinite(value))
+      ) {
+        throw new Error(
+          `Query vector must contain ${dimension} finite numbers for collection ${name}`
+        );
+      }
+
+      return {
+        dimension,
+        points: [...loaded.points.values()],
+      };
+    });
 
     const limit = Math.max(1, options.limit ?? 20);
     const scoreThreshold = options.scoreThreshold ?? 0;
-
     const scored: Array<{ id: string | number; score: number; payload: unknown }> =
       [];
-    for (const point of loaded.points.values()) {
+
+    for (let i = 0; i < snapshot.points.length; i += 1) {
+      if (i > 0 && i % QUERY_YIELD_EVERY === 0) {
+        await yieldEventLoop();
+      }
+      const point = snapshot.points[i];
       const score = cosineSimilarity(queryVector, point.vector);
       if (score >= scoreThreshold) {
         scored.push({
@@ -408,37 +516,50 @@ export class Store {
    * Compact the collection by rewriting unique points (latest id wins).
    */
   async compactCollection(name: string): Promise<number> {
-    const loaded = await this.loadCollection(name);
-    if (!loaded) {
-      throw new Error(`Collection not found: ${name}`);
-    }
-
-    await this.withWriteLock(name, async () => {
+    this.assertWritable();
+    return this.mutexFor(name).run(async () => {
+      const loaded = await this.loadCollectionUnlocked(name);
+      if (!loaded) {
+        throw new Error(`Collection not found: ${name}`);
+      }
       await this.rewritePoints(loaded);
+      return loaded.points.size;
     });
-    return loaded.points.size;
   }
 
   /**
    * Flush dirty collections to a compact JSONL snapshot.
    */
   async persistAllIndexes(): Promise<void> {
-    for (const loaded of this.collections.values()) {
-      if (!loaded.dirty) {
-        continue;
-      }
-      await this.withWriteLock(loaded.name, async () => {
+    this.assertWritable();
+    const names = [...this.collections.keys()];
+    for (const name of names) {
+      await this.mutexFor(name).run(async () => {
+        const loaded = this.collections.get(name);
+        if (!loaded || !loaded.dirty) {
+          return;
+        }
         await this.rewritePoints(loaded);
       });
     }
   }
 
   /**
-   * Drop in-memory collections. Call this before shutdown.
+   * Drop in-memory collections and release the process lock.
    */
-  close(): void {
+  async close(): Promise<void> {
     this.collections.clear();
+    if (this.processLock) {
+      await this.processLock.release();
+      this.processLock = null;
+    }
   }
+}
+
+function yieldEventLoop(): Promise<void> {
+  return new Promise((resolve) => {
+    setImmediate(resolve);
+  });
 }
 
 function cosineSimilarity(a: number[], b: number[]): number {

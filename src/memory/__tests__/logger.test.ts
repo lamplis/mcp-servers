@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
+import { DiskGate } from "../disk-gate.js";
 import {
   addLocalDays,
   createFileLogger,
@@ -156,6 +157,24 @@ describe("createFileLogger", () => {
     expect(stderr.chunks.join("")).toContain('"event":"boom"');
     expect(stderr.chunks.join("")).not.toContain('"event":"quiet"');
     stdoutSpy.mockRestore();
+  });
+
+  it("queues appends through DiskGate until flush", async () => {
+    logDir = makeTempDir();
+    const diskGate = new DiskGate();
+    const logger = createFileLogger({
+      logDir,
+      now: () => new Date(2026, 8, 9),
+      stderr: new MemoryStderr(),
+      diskGate,
+    });
+    logger.info("queued.one");
+    logger.info("queued.two");
+    await logger.flush();
+    expect(readLogLines(path.join(logDir, "2026-09-09.log")).map((line) => line.event)).toEqual([
+      "queued.one",
+      "queued.two",
+    ]);
   });
 
   it("respects log level so debug is dropped at info", () => {

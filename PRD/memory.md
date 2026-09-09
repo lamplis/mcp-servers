@@ -49,6 +49,7 @@ Enable LLMs to maintain persistent memory across conversations, storing informat
 6. **Search Capabilities** - Search across names, types, and observations
 7. **Graph Traversal** - Retrieve entities with their relationships
 8. **Daily file logs** - JSONL logs beside the memory file (`logs/YYYY-MM-DD.log`), kept for 3 local days
+9. **Single-writer robustness** - In-memory graph cache, one mutation mutex, atomic `memory.jsonl` rewrite, and `{memoryFile}.lock` so a second MCP process cannot last-write-wins the same file. Concurrent clients share files safely; this is not multi-user access control.
 
 ## Tools/API Reference
 
@@ -243,6 +244,7 @@ Enable LLMs to maintain persistent memory across conversations, storing informat
 - Observations are atomic (one fact per observation string)
 - File-based storage (no database)
 - Single file for all memory data
+- Concurrent mutations in one process are serialized; a second process on the same `memory.jsonl` waits then errors (`store.busy`). Not multi-user isolation.
 
 ## Configuration and Deployment
 
@@ -345,6 +347,8 @@ docker run -i -v claude-memory:/app/dist --rm mcp/memory
 ### Quality Requirements
 - ✅ Data persistence is reliable
 - ✅ File operations are atomic where possible
+- ✅ Concurrent `add_observations` in one process do not drop facts
+- ✅ Second process on the same `memory.jsonl` errors cleanly; stale lock pids are stolen
 - ✅ Error handling provides clear messages
 - ✅ Backward compatibility with legacy format
 - ✅ Efficient search and retrieval operations
@@ -373,7 +377,7 @@ docker run -i -v claude-memory:/app/dist --rm mcp/memory
 
 ### Limitations
 - Single file storage (no database)
-- No multi-user isolation
+- No multi-user isolation (shared-file locking is crash safety, not auth)
 - No encryption by default
 - No automatic backup
 - No graph visualization tools

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import type { DiskGate } from "./disk-gate.js";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -23,6 +24,7 @@ export interface Logger {
   warn(event: string, fields?: Record<string, unknown>): void;
   error(event: string, fields?: Record<string, unknown>): void;
   close(): void;
+  flush(): Promise<void>;
 }
 
 export interface FileLoggerOptions {
@@ -32,6 +34,7 @@ export interface FileLoggerOptions {
   now?: () => Date;
   maxStringBytes?: number;
   redactVectors?: boolean;
+  diskGate?: DiskGate;
   /** Writable for warn/error mirror. Defaults to process.stderr. Never stdout. */
   stderr?: NodeJS.WritableStream;
 }
@@ -163,6 +166,7 @@ export function createNoopLogger(logDir = ""): Logger {
     warn() {},
     error() {},
     close() {},
+    async flush() {},
   };
 }
 
@@ -192,6 +196,7 @@ export function createCallbackLogger(
     warn: (event, fields) => emit("warn", event, fields),
     error: (event, fields) => emit("error", event, fields),
     close() {},
+    async flush() {},
   };
 }
 
@@ -249,11 +254,19 @@ export function createFileLogger(options: FileLoggerOptions): Logger {
   const maxStringBytes = options.maxStringBytes ?? DEFAULT_MAX_STRING;
   const redactVectors = options.redactVectors ?? true;
   const stderr = options.stderr ?? process.stderr;
+  const diskGate = options.diskGate;
 
   fs.mkdirSync(logDir, { recursive: true });
 
   let currentDate = formatLocalDate(now());
   pruneOldLogs(logDir, currentDate, retentionDays);
+
+  const persist = (fn: () => void): Promise<void> | void => {
+    if (diskGate) {
+      return diskGate.run(fn);
+    }
+    fn();
+  };
 
   const write = (
     level: LogLevel,
@@ -266,7 +279,9 @@ export function createFileLogger(options: FileLoggerOptions): Logger {
     const date = formatLocalDate(now());
     if (date !== currentDate) {
       currentDate = date;
-      pruneOldLogs(logDir, currentDate, retentionDays);
+      void persist(() => {
+        pruneOldLogs(logDir, currentDate, retentionDays);
+      });
     }
     const record: Record<string, unknown> = {
       ts: now().toISOString(),
@@ -277,7 +292,10 @@ export function createFileLogger(options: FileLoggerOptions): Logger {
       record.fields = sanitizeForLog(fields, { maxStringBytes, redactVectors });
     }
     const line = `${JSON.stringify(record)}\n`;
-    fs.appendFileSync(path.join(logDir, `${currentDate}.log`), line, "utf8");
+    const filePath = path.join(logDir, `${currentDate}.log`);
+    void persist(() => {
+      fs.appendFileSync(filePath, line, "utf8");
+    });
     if (level === "warn" || level === "error") {
       stderr.write(line);
     }
@@ -291,5 +309,10 @@ export function createFileLogger(options: FileLoggerOptions): Logger {
     warn: (event, fields) => write("warn", event, fields),
     error: (event, fields) => write("error", event, fields),
     close() {},
+    async flush() {
+      if (diskGate) {
+        await diskGate.drain();
+      }
+    },
   };
 }

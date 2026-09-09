@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import type { DiskGate } from "./disk-gate.js";
 import { Store, type PointRecord } from "./store.js";
 import type { EmbeddingProvider } from "./provider.js";
 import type { Logger } from "./logger.js";
@@ -9,6 +10,7 @@ export type FakeQdrantServerFactoryOptions = {
   dataDir?: string;
   embeddingProvider?: EmbeddingProvider | null;
   logger?: Logger;
+  diskGate?: DiskGate;
 };
 
 export type FakeQdrantServerFactoryResponse = {
@@ -23,7 +25,11 @@ export async function createServer(
 ): Promise<FakeQdrantServerFactoryResponse> {
   const store =
     options.store ??
-    (await Store.create({ dataDir: options.dataDir, logger: options.logger }));
+    (await Store.create({
+      dataDir: options.dataDir,
+      logger: options.logger,
+      diskGate: options.diskGate,
+    }));
 
   const embeddingProvider = options.embeddingProvider ?? null;
   const logger = options.logger;

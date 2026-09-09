@@ -187,6 +187,8 @@ The server can be configured using the following environment variables:
 
 MCP stdio output is not retained by RooCode / VS Code. After an error, open `{memoryFileDir}/logs/YYYY-MM-DD.log`. Each line is one JSON object. Tool calls are logged as `mcp.tool` with names and counts (not full graph dumps). Warn and error lines are also mirrored to stderr.
 
+Concurrent tool calls in one process share `memory.jsonl` safely: mutations run on one mutex and durable writes go through a single disk writer (tmp + rename). A second MCP process on the same file takes `{memoryFile}.lock` and will log `store.busy` rather than last-write-wins corruption. That lock is not multi-user authentication.
+
 # VS Code Installation Instructions
 
 For quick installation, use one of the one-click installation buttons below:

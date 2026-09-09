@@ -50,6 +50,7 @@ Give local development a Qdrant-like collection and query surface that works on 
 7. **Maintenance** - `fake_qdrant_compact_collection` and `fake_qdrant_persist_indexes`.
 8. **Optional embedding helper** - `provider.ts` can call a local or OpenAI-compatible HTTP embeddings API. MCP upsert still takes raw vectors; the helper is not the storage engine.
 9. **Daily file logs** - JSONL logs under `{dataDir}/logs/YYYY-MM-DD.log`, kept for 3 local days, so RooCode/VS Code HTTP and MCP failures can be reproduced from disk.
+10. **Single-writer robustness** - One in-process disk gate for all durable writes; per-collection mutation mutex; `{dataDir}/.write.lock` so a second process cannot rewrite the same JSONL. HTTP returns 503 when the lock is busy. Auto-compact after upsert storms. Not multi-tenant auth.
 
 ### Architecture Summary
 - In-memory `Map` per collection; cosine computed in JavaScript.
@@ -178,6 +179,7 @@ Startup reads these through `loadConfig()` and passes `dataDir` / HTTP bind into
 - No built-in ingest/chunking
 - No auth or multi-tenant isolation
 - Leftover `*.db` files cannot be converted; re-upsert instead
+- Concurrent clients on one process share files safely; a second process on the same data dir fails (`store.busy` / HTTP 503). This is not multi-tenant isolation or authentication.
 
 ### Security Considerations
 - Default HTTP bind is loopback
@@ -190,6 +192,7 @@ Startup reads these through `loadConfig()` and passes `dataDir` / HTTP bind into
 - Collection create, upsert, query, compact, persist
 - HTTP shim for the supported route subset
 - Daily file logger: local-date filename, midnight rollover, 3-day prune, vector redaction, no stdout
+- Concurrent upserts/deletes keep valid JSONL and latest-id-wins; auto-compact threshold; process lock busy and stale-pid steal; HTTP 503 when the write lock is held
 - Tests run from npm-installed dependencies with no native SQLite
 
 ## Configuration and Deployment

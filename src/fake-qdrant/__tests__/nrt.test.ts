@@ -51,7 +51,7 @@ describe("Fake Qdrant NRT (Non-Regression Test)", () => {
 
   afterAll(async () => {
     await server.close();
-    store.close();
+    await store.close();
     await fs.rm(testDataDir, { recursive: true, force: true }).catch(() => {});
   });
 

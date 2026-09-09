@@ -18,12 +18,11 @@ describe('KnowledgeGraphManager', () => {
   });
 
   afterEach(async () => {
-    // Clean up test file
-    try {
-      await fs.unlink(testFilePath);
-    } catch (error) {
-      // Ignore errors if file doesn't exist
-    }
+    await manager.close();
+    await fs.unlink(testFilePath).catch(() => undefined);
+    await fs
+      .rm(`${testFilePath}.lock`, { recursive: true, force: true })
+      .catch(() => undefined);
   });
 
   describe('createEntities', () => {

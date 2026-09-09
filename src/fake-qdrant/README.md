@@ -10,6 +10,7 @@ Fake Qdrant implements a subset of the Qdrant vector database API, offering:
 - **HTTP API Shim** - Qdrant-compatible REST API on port 6333 (optional)
 - **JSONL Vector Search** - Brute-force cosine similarity in pure JavaScript (no database binaries)
 - **Persistent Storage** - Data persisted as `meta.json` + `points.jsonl` per collection
+- **Single-writer disk I/O** - Concurrent HTTP and MCP requests share one in-process writer; `{dataDir}/.write.lock` stops a second process from rewriting the same JSONL files
 - **Daily file logs** - JSONL logs under `{dataDir}/logs/YYYY-MM-DD.log`, kept for 3 days
 - **Zero External Services** - Node.js implementation, no Docker, SQLite, or Qdrant binary
 
@@ -31,13 +32,13 @@ Fake Qdrant implements a subset of the Qdrant vector database API, offering:
                              ▼
               ┌─────────────────────────────┐
               │          Store              │
-              │   Collection Management     │
+              │ collection mutex → DiskGate │
               └──────────────┬──────────────┘
                              │
                              ▼
               ┌─────────────────────────────┐
-              │     JSONL + in-memory maps  │
-              │   brute-force cosine KNN    │
+              │ JSONL + in-memory maps      │
+              │ cosine KNN; process lockdir │
               └─────────────────────────────┘
 ```
 
@@ -288,6 +289,14 @@ Get-Content ".\data\fake-qdrant\logs\$(Get-Date -Format yyyy-MM-dd).log" -Tail 8
 
 Each line is one JSON object (`event`, `level`, `fields`). HTTP requests from RooCode's Qdrant client show up as `http.request` (vectors are redacted). MCP tool calls show up as `mcp.tool`. Warn and error lines are also mirrored to stderr. Files older than 3 local days are deleted on startup and at midnight rollover.
 
+### HTTP 503 / `store.busy`
+
+**Symptom:** Collection or point requests return 503 `service busy`, or logs show `store.busy`.
+
+Another MCP or HTTP process already holds `{dataDir}/.write.lock`. Concurrent clients in **one** process are serialized and safe. Two processes must not share the same data directory: stop the other indexer, or point this instance at a different `FAKE_QDRANT_DATA_DIR`. If the holder crashed, a stale pid in that lockdir is stolen on the next start.
+
+This is not multi-tenant access control. There is still no auth between clients.
+
 ### Port 6333 Already in Use
 
 **Symptom:** Server fails to start with `EADDRINUSE` error.
@@ -526,6 +535,7 @@ src/fake-qdrant/
 - **Filters:** Basic filter support for delete operations (must/should conditions)
 - **Scroll/Pagination:** Not implemented for large result sets
 - **Sharding:** Single-node only, no distributed support
+- **Concurrency:** Overlapping requests in one process share files safely (one disk writer). A second process on the same data dir fails instead of corrupting JSONL. This is not multi-tenant isolation or authentication.
 
 ## License
 

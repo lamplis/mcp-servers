@@ -3,6 +3,7 @@ import http from 'http';
 import { Store } from '../store.js';
 import { startQdrantHttpServer, QdrantHttpServerHandle } from '../qdrant-http.js';
 import { resolveDataDir } from '../store.js';
+import { acquireProcessLock, lockDirForDataDir } from '../disk-gate.js';
 import fs from 'fs/promises';
 import path from 'path';
 
@@ -40,7 +41,7 @@ describe('Fake Qdrant HTTP API Integration Tests', () => {
     }
     // Drop in-memory collections before removing files
     if (store) {
-      store.close();
+      await store.close();
     }
     if (testDataDir) {
       try {
@@ -601,6 +602,123 @@ describe('Fake Qdrant HTTP API Integration Tests', () => {
         req.on('error', reject);
         req.end();
       });
+    });
+  });
+});
+
+describe('Fake Qdrant HTTP API when the data dir is locked', () => {
+  let server: QdrantHttpServerHandle | null = null;
+  let store: Store | null = null;
+  let testDataDir: string;
+  let extraLock: { release(): Promise<void> } | undefined;
+
+  afterEach(async () => {
+    if (server) {
+      await server.close();
+      server = null;
+    }
+    if (store) {
+      await store.close();
+      store = null;
+    }
+    if (extraLock) {
+      await extraLock.release();
+      extraLock = undefined;
+    }
+    if (testDataDir) {
+      await fs.rm(testDataDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  it('returns 503 when another live process holds the write lock', async () => {
+    testDataDir = path.join(
+      resolveDataDir(),
+      `busy-${Date.now()}-${Math.random().toString(36).substring(7)}`
+    );
+    await fs.mkdir(testDataDir, { recursive: true });
+    extraLock = await acquireProcessLock({
+      lockDir: lockDirForDataDir(testDataDir),
+      pid: 424242,
+      isAlive: () => true,
+      retries: 0,
+    });
+    store = await Store.create({
+      dataDir: testDataDir,
+      lockRetries: 0,
+      lockRetryMs: 1,
+    });
+    expect(store.isBusy).toBe(true);
+    server = await startQdrantHttpServer({
+      store,
+      host: '127.0.0.1',
+      port: 0,
+      logger: () => {},
+    });
+    const testPort = server.port;
+    const list = await new Promise<{ status: number; data: unknown }>((resolve, reject) => {
+      const req = http.request(
+        {
+          method: 'GET',
+          hostname: '127.0.0.1',
+          port: testPort,
+          path: '/collections',
+        },
+        (res) => {
+          let data = '';
+          res.on('data', (chunk) => {
+            data += chunk.toString();
+          });
+          res.on('end', () => {
+            resolve({
+              status: res.statusCode || 500,
+              data: data ? JSON.parse(data) : {},
+            });
+          });
+        }
+      );
+      req.on('error', reject);
+      req.end();
+    });
+    expect(list.status).toBe(503);
+    expect(list.data).toMatchObject({
+      status: { error: 'service busy' },
+    });
+
+    const body = JSON.stringify({
+      vectors: { size: 2, distance: 'Cosine' },
+    });
+    const created = await new Promise<{ status: number; data: unknown }>((resolve, reject) => {
+      const req = http.request(
+        {
+          method: 'PUT',
+          hostname: '127.0.0.1',
+          port: testPort,
+          path: '/collections/blocked',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(body),
+          },
+        },
+        (res) => {
+          let data = '';
+          res.on('data', (chunk) => {
+            data += chunk.toString();
+          });
+          res.on('end', () => {
+            resolve({
+              status: res.statusCode || 500,
+              data: data ? JSON.parse(data) : {},
+            });
+          });
+        }
+      );
+      req.on('error', reject);
+      req.write(body);
+      req.end();
+    });
+    expect(created.status).toBe(503);
+    expect(created.data).toMatchObject({
+      status: { error: 'service busy' },
     });
   });
 });

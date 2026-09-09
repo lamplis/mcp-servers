@@ -2,6 +2,7 @@ import http from "node:http";
 import { URL } from "node:url";
 import { Store } from "./store.js";
 import { toLogger, type Logger } from "./logger.js";
+import { ProcessLockBusyError } from "./disk-gate.js";
 
 export interface QdrantHttpServerOptions {
   store: Store;
@@ -54,17 +55,35 @@ export async function startQdrantHttpServer(
     try {
       await handleRequest(req, res, options.store, requestLog);
     } catch (error) {
-      sendJson(
-        res,
-        500,
-        {
-          status: {
-            error: "internal server error",
-            message: error instanceof Error ? error.message : String(error),
+      if (error instanceof ProcessLockBusyError) {
+        options.store && logger.error("store.busy", {
+          holderPid: error.holderPid,
+          message: error.message,
+        });
+        sendJson(
+          res,
+          503,
+          {
+            status: {
+              error: "service busy",
+              message: error.message,
+            },
           },
-        },
-        requestLog
-      );
+          requestLog
+        );
+      } else {
+        sendJson(
+          res,
+          500,
+          {
+            status: {
+              error: "internal server error",
+              message: error instanceof Error ? error.message : String(error),
+            },
+          },
+          requestLog
+        );
+      }
     }
     emitHttpLog(logger, requestLog, Date.now() - started);
   });
@@ -267,6 +286,7 @@ async function handleRequest(
       await store.createCollection(collectionName, { size, distance });
       return json(200, { result: true, status: "ok", time: 0 });
     } catch (error) {
+      rethrowIfBusy(error);
       return json(400, {
         status: { error: error instanceof Error ? error.message : String(error) },
       });
@@ -310,6 +330,7 @@ async function handleRequest(
         time: 0,
       });
     } catch (error) {
+      rethrowIfBusy(error);
       return json(400, {
         status: { error: error instanceof Error ? error.message : String(error) },
       });
@@ -339,6 +360,7 @@ async function handleRequest(
       });
       return json(200, { result: results, status: "ok", time: 0 });
     } catch (error) {
+      rethrowIfBusy(error);
       return json(400, {
         status: { error: error instanceof Error ? error.message : String(error) },
       });
@@ -449,6 +471,7 @@ async function handleRequest(
         time: 0,
       });
     } catch (error) {
+      rethrowIfBusy(error);
       return json(400, {
         status: { error: error instanceof Error ? error.message : String(error) },
       });
@@ -465,6 +488,7 @@ async function handleRequest(
         time: 0,
       });
     } catch (error) {
+      rethrowIfBusy(error);
       return json(400, {
         status: { error: error instanceof Error ? error.message : String(error) },
       });
@@ -478,6 +502,12 @@ async function handleRequest(
     rawUrl: req.url ?? "",
     sidecar: "fake-qdrant-mcp",
   });
+}
+
+function rethrowIfBusy(error: unknown): void {
+  if (error instanceof ProcessLockBusyError) {
+    throw error;
+  }
 }
 
 function sendJson(

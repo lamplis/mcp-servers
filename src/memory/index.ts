@@ -10,6 +10,7 @@ import {
   resolveMemoryLogConfig,
 } from "./server.js";
 import { createFileLogger } from "./logger.js";
+import { DiskGate } from "./disk-gate.js";
 
 export {
   defaultMemoryPath,
@@ -22,11 +23,13 @@ export {
 async function main() {
   const memoryFilePath = resolveMemoryFilePathFromEnv();
   const logConfig = resolveMemoryLogConfig(memoryFilePath);
+  const diskGate = new DiskGate();
   const logger = createFileLogger({
     logDir: logConfig.logDir,
     level: logConfig.level,
     retentionDays: logConfig.retentionDays,
     redactVectors: false,
+    diskGate,
   });
 
   logger.info("lifecycle.start", {
@@ -41,14 +44,15 @@ async function main() {
     `Knowledge Graph MCP Server running on stdio; logs: ${logger.currentFilePath()}`
   );
 
-  const { server, cleanup } = await createServer({ logger });
+  const { server, cleanup } = await createServer({ logger, diskGate });
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
   const shutdown = async () => {
     logger.info("lifecycle.shutdown", {});
     await server.close();
-    cleanup();
+    await cleanup();
+    await logger.flush();
     logger.close();
     process.exit(0);
   };

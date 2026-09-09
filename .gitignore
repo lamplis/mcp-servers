@@ -317,6 +317,10 @@ src/fake-qdrant/data/
 src/memory/logs/
 data/fake-qdrant/logs/
 
+# Cross-process write locks
+**/.write.lock/
+*.jsonl.lock/
+
 # Runtime JSON / leftover SQLite indexes (do not commit)
 data/**/*.db
 data/**/*.db-wal
