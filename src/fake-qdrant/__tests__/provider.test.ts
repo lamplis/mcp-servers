@@ -1,22 +1,43 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import http from "http";
 import {
-  ExternalEmbeddingProvider,
-  LocalEmbeddingProvider,
+  OpenAICompatibleProvider,
   createProvider,
+  resolveEmbeddingsUrl,
+  EmbeddingError,
 } from "../provider.js";
 import { ConfigError, type FakeQdrantConfig } from "../config.js";
 
+type CapturedRequest = {
+  url?: string;
+  authorization?: string;
+  body: unknown;
+};
+
 function createMockEmbeddingServer(
-  handler: (body: unknown) => { status: number; data: unknown }
-): Promise<{ server: http.Server; port: number; close: () => Promise<void> }> {
+  handler: (
+    body: unknown,
+    req: http.IncomingMessage
+  ) => { status: number; data: unknown }
+): Promise<{
+  server: http.Server;
+  port: number;
+  close: () => Promise<void>;
+  requests: CapturedRequest[];
+}> {
+  const requests: CapturedRequest[] = [];
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
       let data = "";
       req.on("data", (chunk) => (data += chunk));
       req.on("end", () => {
         const body = data ? JSON.parse(data) : {};
-        const result = handler(body);
+        requests.push({
+          url: req.url,
+          authorization: req.headers.authorization,
+          body,
+        });
+        const result = handler(body, req);
         res.writeHead(result.status, { "Content-Type": "application/json" });
         res.end(JSON.stringify(result.data));
       });
@@ -27,6 +48,7 @@ function createMockEmbeddingServer(
       resolve({
         server,
         port: addr.port,
+        requests,
         close: () =>
           new Promise<void>((res, rej) =>
             server.close((err) => (err ? rej(err) : res()))
@@ -36,22 +58,54 @@ function createMockEmbeddingServer(
   });
 }
 
-describe("ExternalEmbeddingProvider", () => {
-  it("should accept any model name", () => {
-    const provider = new ExternalEmbeddingProvider(
-      "http://localhost:1234",
-      "bge-large-en-v1.5"
+const baseConfig: FakeQdrantConfig = {
+  httpEnabled: false,
+  httpHost: "127.0.0.1",
+  httpPort: 6333,
+  dataDir: "./data",
+  logDir: null,
+  logLevel: "info",
+  logRetentionDays: 3,
+  embeddingProvider: "local",
+  embeddingBaseUrl: null,
+  embeddingModel: null,
+  embeddingApiKey: null,
+  embeddingDim: null,
+  embeddingTimeoutMs: 30_000,
+  localEmbeddingsTarget: null,
+  dropEmptyChunks: false,
+  flagPayloadPatterns: [],
+  slowRequestMs: 1000,
+  takeover: true,
+  strictCreate: false,
+};
+
+describe("resolveEmbeddingsUrl", () => {
+  it("appends /v1/embeddings for a bare host", () => {
+    expect(resolveEmbeddingsUrl("http://127.0.0.1:3100")).toBe(
+      "http://127.0.0.1:3100/v1/embeddings"
     );
-    expect(provider.model).toBe("bge-large-en-v1.5");
-    expect(provider.mode).toBe("external");
-    expect(provider.dimensions).toBeNull();
+    expect(resolveEmbeddingsUrl("http://127.0.0.1:3100/")).toBe(
+      "http://127.0.0.1:3100/v1/embeddings"
+    );
   });
 
-  it("should call the embedding endpoint and return vectors", async () => {
+  it("appends /embeddings when a path is already present", () => {
+    expect(resolveEmbeddingsUrl("https://server.com/v1/openai")).toBe(
+      "https://server.com/v1/openai/embeddings"
+    );
+    expect(resolveEmbeddingsUrl("https://server.com/v1/openai/")).toBe(
+      "https://server.com/v1/openai/embeddings"
+    );
+  });
+});
+
+describe("OpenAICompatibleProvider", () => {
+  it("posts Bearer auth, records the embeddings path, and returns vectors", async () => {
     const mock = await createMockEmbeddingServer(() => ({
       status: 200,
       data: {
-        model: "bge-large-en-v1.5",
+        model: "bge-m3",
         data: [
           { index: 0, embedding: [0.1, 0.2, 0.3] },
           { index: 1, embedding: [0.4, 0.5, 0.6] },
@@ -60,42 +114,123 @@ describe("ExternalEmbeddingProvider", () => {
     }));
 
     try {
-      const provider = new ExternalEmbeddingProvider(
-        `http://127.0.0.1:${mock.port}`,
-        "bge-large-en-v1.5"
+      const provider = new OpenAICompatibleProvider(
+        "external",
+        `http://127.0.0.1:${mock.port}/v1/openai`,
+        "bge-m3",
+        "secret-key",
+        3,
+        5_000
       );
       const result = await provider.embed(["hello", "world"]);
 
-      expect(result.model).toBe("bge-large-en-v1.5");
-      expect(result.embeddings).toHaveLength(2);
-      expect(result.embeddings[0]).toEqual([0.1, 0.2, 0.3]);
+      expect(result.model).toBe("bge-m3");
+      expect(result.embeddings).toEqual([
+        [0.1, 0.2, 0.3],
+        [0.4, 0.5, 0.6],
+      ]);
       expect(result.dimensions).toBe(3);
-      expect(provider.dimensions).toBe(3);
+      expect(mock.requests).toHaveLength(1);
+      expect(mock.requests[0]?.url).toBe("/v1/openai/embeddings");
+      expect(mock.requests[0]?.authorization).toBe("Bearer secret-key");
+      const info = provider.describe();
+      expect(info).toEqual({
+        mode: "external",
+        model: "bge-m3",
+        baseUrlHost: `127.0.0.1:${mock.port}`,
+        dim: 3,
+      });
+      expect(JSON.stringify(info)).not.toContain("secret-key");
     } finally {
       await mock.close();
     }
   });
 
-  it("should throw on server error", async () => {
+  it("batches more than 64 inputs into multiple POSTs", async () => {
+    const mock = await createMockEmbeddingServer((body) => {
+      const input = (body as { input: string[] }).input;
+      return {
+        status: 200,
+        data: {
+          model: "bge-m3",
+          data: input.map((_, index) => ({
+            index,
+            embedding: [1, 0, 0],
+          })),
+        },
+      };
+    });
+
+    try {
+      const provider = new OpenAICompatibleProvider(
+        "external",
+        `http://127.0.0.1:${mock.port}`,
+        "bge-m3",
+        null,
+        3,
+        5_000
+      );
+      const texts = Array.from({ length: 65 }, (_, i) => `t${i}`);
+      const result = await provider.embed(texts);
+      expect(result.embeddings).toHaveLength(65);
+      expect(mock.requests).toHaveLength(2);
+      expect((mock.requests[0]?.body as { input: string[] }).input).toHaveLength(64);
+      expect((mock.requests[1]?.body as { input: string[] }).input).toHaveLength(1);
+      expect(mock.requests[0]?.authorization).toBeUndefined();
+    } finally {
+      await mock.close();
+    }
+  });
+
+  it("throws on dimension mismatch", async () => {
+    const mock = await createMockEmbeddingServer(() => ({
+      status: 200,
+      data: {
+        model: "bge-m3",
+        data: [{ index: 0, embedding: [0.1, 0.2, 0.3] }],
+      },
+    }));
+
+    try {
+      const provider = new OpenAICompatibleProvider(
+        "external",
+        `http://127.0.0.1:${mock.port}`,
+        "bge-m3",
+        null,
+        1024,
+        5_000
+      );
+      await expect(provider.embed(["ping"])).rejects.toThrow(EmbeddingError);
+      await expect(provider.embed(["ping"])).rejects.toThrow(
+        "Embedding dimension mismatch: expected 1024, got 3"
+      );
+    } finally {
+      await mock.close();
+    }
+  });
+
+  it("throws on server error", async () => {
     const mock = await createMockEmbeddingServer(() => ({
       status: 500,
       data: { error: "internal error" },
     }));
 
     try {
-      const provider = new ExternalEmbeddingProvider(
+      const provider = new OpenAICompatibleProvider(
+        "external",
         `http://127.0.0.1:${mock.port}`,
-        "bge-large-en-v1.5"
+        "bge-m3",
+        null,
+        null,
+        5_000
       );
       await expect(provider.embed(["test"])).rejects.toThrow("status 500");
     } finally {
       await mock.close();
     }
   });
-});
 
-describe("LocalEmbeddingProvider", () => {
-  it("should call the local embedding endpoint", async () => {
+  it("uses the local target in local mode", async () => {
     const mock = await createMockEmbeddingServer((body) => ({
       status: 200,
       data: {
@@ -105,15 +240,19 @@ describe("LocalEmbeddingProvider", () => {
     }));
 
     try {
-      const provider = new LocalEmbeddingProvider(
+      const provider = new OpenAICompatibleProvider(
+        "local",
         `http://127.0.0.1:${mock.port}`,
-        "Xenova/all-MiniLM-L6-v2"
+        "Xenova/all-MiniLM-L6-v2",
+        null,
+        null,
+        5_000
       );
       expect(provider.mode).toBe("local");
-
       const result = await provider.embed(["hello"]);
       expect(result.embeddings).toHaveLength(1);
       expect(result.dimensions).toBe(2);
+      expect(mock.requests[0]?.url).toBe("/v1/embeddings");
     } finally {
       await mock.close();
     }
@@ -121,21 +260,7 @@ describe("LocalEmbeddingProvider", () => {
 });
 
 describe("createProvider", () => {
-  const baseConfig: FakeQdrantConfig = {
-    httpEnabled: false,
-    httpHost: "127.0.0.1",
-    httpPort: 6333,
-    dataDir: "./data",
-    logDir: null,
-    logLevel: "info",
-    logRetentionDays: 3,
-    embeddingProvider: "local",
-    embeddingBaseUrl: null,
-    embeddingModel: null,
-    localEmbeddingsTarget: null,
-  };
-
-  it("should create a LocalEmbeddingProvider for local mode", () => {
+  it("should create a local OpenAI-compatible provider", () => {
     const provider = createProvider({
       ...baseConfig,
       embeddingProvider: "local",
@@ -145,7 +270,7 @@ describe("createProvider", () => {
     expect(provider!.mode).toBe("local");
   });
 
-  it("should create an ExternalEmbeddingProvider for external mode", () => {
+  it("should create an external OpenAI-compatible provider", () => {
     const provider = createProvider({
       ...baseConfig,
       embeddingProvider: "external",

@@ -9,10 +9,11 @@ Fake Qdrant implements a subset of the Qdrant vector database API, offering:
 - **MCP Tools Interface** - Direct integration with MCP-compatible clients (VS Code, RooCode, Claude Desktop)
 - **HTTP API Shim** - Qdrant-compatible REST API on port 6333 (optional)
 - **JSONL Vector Search** - Brute-force cosine similarity in pure JavaScript (no database binaries)
+- **Optional embedding provider** - OpenAI-compatible HTTP (`OPENAI_EMBED_*` / `FAKE_QDRANT_EMBEDDING_*`) so MCP/HTTP can pass `text` instead of a raw vector. Roo `codebase_search` still embeds client-side and sends `query: number[]`.
 - **Persistent Storage** - Data persisted as `meta.json` + `points.jsonl` per collection
 - **Single-writer disk I/O** - Concurrent HTTP and MCP requests share one in-process writer; `{dataDir}/.write.lock` stops a second process from rewriting the same JSONL files
 - **Daily file logs** - JSONL logs under `{dataDir}/logs/YYYY-MM-DD.log`, kept for 3 days
-- **Zero External Services** - Node.js implementation, no Docker, SQLite, or Qdrant binary
+- **Zero extra binaries** - Node.js only; no Docker, SQLite, or Qdrant process. Optional HTTP embedder is configured via env, not required to store vectors.
 
 ## Architecture
 
@@ -83,23 +84,32 @@ The server exposes the following MCP tools:
   "points": [
     {
       "id": "doc-001",
-      "vector": [0.1, 0.2, ...],
+      "vector": [0.1, 0.2, "..."],
       "payload": { "title": "Document 1", "path": "/docs/file.md" }
+    },
+    {
+      "id": "doc-002",
+      "text": "optional: embed this instead of passing a vector",
+      "payload": { "title": "Document 2" }
     }
   ]
 }
 ```
+
+Each point needs exactly one of `vector` or `text`. Text is batch-embedded when an OpenAI-compatible provider is configured.
 
 #### fake_qdrant_query_points
 
 ```json
 {
   "collection": "my-vectors",
-  "vector": [0.1, 0.2, ...],
+  "vector": [0.1, 0.2, "..."],
   "limit": 10,
   "scoreThreshold": 0.7
 }
 ```
+
+Pass exactly one of `vector` or `text`. `fake_qdrant_status` includes `embedding: { mode, model, baseUrlHost, dim }` when a provider started successfully.
 
 ## HTTP API (Optional)
 
@@ -131,7 +141,7 @@ When enabled, the server exposes a Qdrant-compatible HTTP API:
 | `POST` | `/collections/{name}/points/delete` | Delete points by ID or filter |
 | `POST` | `/collections/{name}/compact` | Compact collection (custom endpoint) |
 
-Query bodies accept canonical Qdrant shapes (`query: number[]`, `{ nearest }`, nearest-by-id, omitted query = list by id) plus the Roo dialect (`vector`, `query.vector`, `query.nearest.vector`). `prefetch`, `using`, `params`, `lookup_from`, `shard_key`, and `fusion`/`recommend`/`discover`/`sample`/`formula` return **400** `Unsupported query: <field>`.
+Query bodies accept canonical Qdrant shapes (`query: number[]`, `{ nearest }`, nearest-by-id, omitted query = list by id) plus the Roo dialect (`vector`, `query.vector`, `query.nearest.vector`). Inference documents `query: { text, model? }` and `query: { nearest: { text, model? } }` are embedded when a provider is configured. Tuning fields `params`, `indexed_only`, `timeout`, `consistency`, and `wait` are ignored. `prefetch`, `using`, `lookup_from`, `shard_key`, and `fusion`/`recommend`/`discover`/`sample`/`formula` return **400** `Unsupported query: <field>`.
 
 ### Supported filters
 
@@ -252,6 +262,17 @@ Add to `.cursor/mcp.json`:
 | `FAKE_QDRANT_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` |
 | `FAKE_QDRANT_LOG_RETENTION_DAYS` | `3` | Keep this many local calendar days of log files |
 | `FAKE_QDRANT_STRICT_CREATE` | `0` | Set to `1` so `PUT /collections/{name}` returns 409 when the collection already exists |
+| `FAKE_QDRANT_EMBEDDING_PROVIDER` | inferred | `local` or `external`. Unset + a base URL infers `external`; otherwise `local`. |
+| `FAKE_QDRANT_EMBEDDING_BASE_URL` | `OPENAI_EMBED_BASE_URL` | OpenAI-compatible base (no trailing `/embeddings`). Bare host gets `/v1` then `/embeddings`. |
+| `FAKE_QDRANT_EMBEDDING_MODEL` | `OPENAI_EMBED_MODEL` | Model name sent in `{ input, model }` |
+| `FAKE_QDRANT_EMBEDDING_API_KEY` | `OPENAI_EMBED_API_KEY` | Bearer token; never logged |
+| `FAKE_QDRANT_EMBEDDING_DIM` | `OPENAI_EMBED_DIM` | Expected vector width; mismatch throws |
+| `FAKE_QDRANT_EMBEDDING_TIMEOUT_MS` | `30000` | HTTP timeout for embedding calls |
+| `FAKE_QDRANT_LOCAL_EMBEDDINGS_TARGET` | `http://127.0.0.1:3100` | Local-mode base URL |
+
+Each `FAKE_QDRANT_EMBEDDING_*` falls back to the matching `OPENAI_EMBED_*` so one env block can feed fake-qdrant and docsearch. Direct intranet access is assumed (`node:http` / `node:https`, no PAC). If the host later requires the corporate proxy, an explicit proxy would have to be added.
+
+HTTP `PUT /points` also accepts Qdrant inference vectors `{ "text": "...", "model"? }`. Missing provider → **400**. Embedding HTTP failure → **502** `{ status: { error: "embedding: ..." } }`.
 
 ## Usage Examples
 

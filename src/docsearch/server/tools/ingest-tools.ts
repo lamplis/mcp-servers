@@ -5,6 +5,7 @@ import { Indexer } from '../../ingest/indexer.js';
 import { ingestConfluence } from '../../ingest/sources/confluence.js';
 import { ingestFiles } from '../../ingest/sources/files.js';
 import { ingestUrls } from '../../ingest/sources/urls.js';
+import { getEmbedderStatus } from '../../ingest/embeddings.js';
 
 import { getIndexingState, setIndexingIdle, setIndexingRunning } from '../../shared/indexing-state.js';
 import type { DatabaseAdapter } from '../../ingest/adapters/index.js';
@@ -96,9 +97,10 @@ export function registerIngestTools(server: McpServer): void {
         const adapter = await getDatabase();
         const stats = await getIndexStats(adapter, input.detailed || false);
         const indexing = getIndexingState();
+        const embedder = getEmbedderStatus();
 
         return {
-          content: [{ type: 'text' as const, text: formatStatsOutput({ ...stats, ...indexing }, input.detailed) }],
+          content: [{ type: 'text' as const, text: formatStatsOutput({ ...stats, ...indexing, embedder }, input.detailed) }],
         };
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
@@ -150,6 +152,21 @@ function formatStatsOutput(stats: Record<string, unknown>, detailed?: boolean): 
     `⚙️ Indexing: ${stats.indexing ?? 'idle'}`,
     `🕒 Last run: ${stats.lastRun ?? 'never'}`,
   ];
+  if (stats.embedder && typeof stats.embedder === 'object') {
+    const embedder = stats.embedder as {
+      provider?: string;
+      model?: string;
+      dim?: number;
+      ready?: boolean;
+      reason?: string | null;
+    };
+    lines.push(
+      `🧮 Embedder: ${embedder.provider ?? '?'} ${embedder.model ?? ''} dim=${embedder.dim ?? '?'} ready=${embedder.ready === true}`,
+    );
+    if (embedder.reason) {
+      lines.push(`⚠️ Embedder: ${embedder.reason}`);
+    }
+  }
   if (stats.lastError) {
     lines.push(`⚠️ Last error: ${stats.lastError}`);
   }

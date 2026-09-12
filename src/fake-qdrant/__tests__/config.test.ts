@@ -19,6 +19,9 @@ describe("loadConfig", () => {
     expect(config.embeddingProvider).toBe("local");
     expect(config.embeddingBaseUrl).toBeNull();
     expect(config.embeddingModel).toBeNull();
+    expect(config.embeddingApiKey).toBeNull();
+    expect(config.embeddingDim).toBeNull();
+    expect(config.embeddingTimeoutMs).toBe(30_000);
     expect(config.localEmbeddingsTarget).toBeNull();
   });
 
@@ -127,6 +130,42 @@ describe("loadConfig", () => {
   it("should parse FAKE_QDRANT_STRICT_CREATE=1", () => {
     const config = loadConfig({ FAKE_QDRANT_STRICT_CREATE: "1" });
     expect(config.strictCreate).toBe(true);
+  });
+
+  it("falls back to OPENAI_EMBED_* when FAKE_QDRANT_EMBEDDING_* is unset", () => {
+    const config = loadConfig({
+      OPENAI_EMBED_BASE_URL: "https://server.com/v1/openai",
+      OPENAI_EMBED_MODEL: "bge-m3",
+      OPENAI_EMBED_API_KEY: "shared-key",
+      OPENAI_EMBED_DIM: "1024",
+    });
+    expect(config.embeddingProvider).toBe("external");
+    expect(config.embeddingBaseUrl).toBe("https://server.com/v1/openai");
+    expect(config.embeddingModel).toBe("bge-m3");
+    expect(config.embeddingApiKey).toBe("shared-key");
+    expect(config.embeddingDim).toBe(1024);
+  });
+
+  it("prefers FAKE_QDRANT_EMBEDDING_* over OPENAI_EMBED_*", () => {
+    const config = loadConfig({
+      FAKE_QDRANT_EMBEDDING_BASE_URL: "http://fq.example",
+      FAKE_QDRANT_EMBEDDING_MODEL: "fq-model",
+      FAKE_QDRANT_EMBEDDING_API_KEY: "fq-key",
+      FAKE_QDRANT_EMBEDDING_DIM: "384",
+      OPENAI_EMBED_BASE_URL: "https://server.com/v1/openai",
+      OPENAI_EMBED_MODEL: "bge-m3",
+      OPENAI_EMBED_API_KEY: "shared-key",
+      OPENAI_EMBED_DIM: "1024",
+    });
+    expect(config.embeddingBaseUrl).toBe("http://fq.example");
+    expect(config.embeddingModel).toBe("fq-model");
+    expect(config.embeddingApiKey).toBe("fq-key");
+    expect(config.embeddingDim).toBe(384);
+  });
+
+  it("parses FAKE_QDRANT_EMBEDDING_TIMEOUT_MS", () => {
+    const config = loadConfig({ FAKE_QDRANT_EMBEDDING_TIMEOUT_MS: "15000" });
+    expect(config.embeddingTimeoutMs).toBe(15_000);
   });
 });
 

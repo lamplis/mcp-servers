@@ -6,6 +6,8 @@ export type EmbeddingProviderMode = "local" | "external";
 
 export const FAKE_QDRANT_SIDECAR = "fake-qdrant-mcp";
 export const DEFAULT_FLAG_PAYLOAD_PATTERNS = ["Error converting", "Traceback"];
+export const DEFAULT_EMBEDDING_TIMEOUT_MS = 30_000;
+export const DEFAULT_EMBEDDING_BATCH = 64;
 
 export interface FakeQdrantConfig {
   httpEnabled: boolean;
@@ -18,6 +20,9 @@ export interface FakeQdrantConfig {
   embeddingProvider: EmbeddingProviderMode;
   embeddingBaseUrl: string | null;
   embeddingModel: string | null;
+  embeddingApiKey: string | null;
+  embeddingDim: number | null;
+  embeddingTimeoutMs: number;
   localEmbeddingsTarget: string | null;
   dropEmptyChunks: boolean;
   flagPayloadPatterns: string[];
@@ -40,10 +45,22 @@ export function defaultFakeQdrantDataDir(metaUrl = import.meta.url): string {
 export function loadConfig(
   env: Record<string, string | undefined> = process.env
 ): FakeQdrantConfig {
-  const providerRaw = env.FAKE_QDRANT_EMBEDDING_PROVIDER ?? "local";
-  const provider = parseProviderMode(providerRaw);
-  const embeddingBaseUrl = env.FAKE_QDRANT_EMBEDDING_BASE_URL ?? null;
-  const embeddingModel = env.FAKE_QDRANT_EMBEDDING_MODEL ?? null;
+  const embeddingBaseUrl =
+    firstNonEmpty(env.FAKE_QDRANT_EMBEDDING_BASE_URL, env.OPENAI_EMBED_BASE_URL) ?? null;
+  const embeddingModel =
+    firstNonEmpty(env.FAKE_QDRANT_EMBEDDING_MODEL, env.OPENAI_EMBED_MODEL) ?? null;
+  const embeddingApiKey =
+    firstNonEmpty(env.FAKE_QDRANT_EMBEDDING_API_KEY, env.OPENAI_EMBED_API_KEY) ?? null;
+  const embeddingDim = parseOptionalPositiveInt(
+    env.FAKE_QDRANT_EMBEDDING_DIM ?? env.OPENAI_EMBED_DIM
+  );
+
+  const providerRaw = env.FAKE_QDRANT_EMBEDDING_PROVIDER;
+  const provider = providerRaw
+    ? parseProviderMode(providerRaw)
+    : embeddingBaseUrl
+      ? "external"
+      : "local";
 
   if (provider === "external") {
     if (!embeddingBaseUrl) {
@@ -64,6 +81,12 @@ export function loadConfig(
     embeddingProvider: provider,
     embeddingBaseUrl,
     embeddingModel,
+    embeddingApiKey,
+    embeddingDim,
+    embeddingTimeoutMs: parsePositiveInt(
+      env.FAKE_QDRANT_EMBEDDING_TIMEOUT_MS,
+      DEFAULT_EMBEDDING_TIMEOUT_MS
+    ),
     localEmbeddingsTarget: env.FAKE_QDRANT_LOCAL_EMBEDDINGS_TARGET ?? null,
     dropEmptyChunks: env.FAKE_QDRANT_DROP_EMPTY_CHUNKS === "1",
     flagPayloadPatterns: parseCsv(
@@ -78,6 +101,17 @@ export function loadConfig(
 
 export function getDefaultExternalModel(): string {
   return DEFAULT_EXTERNAL_MODEL;
+}
+
+function firstNonEmpty(
+  ...values: Array<string | undefined>
+): string | undefined {
+  for (const value of values) {
+    if (value && value.trim()) {
+      return value.trim();
+    }
+  }
+  return undefined;
 }
 
 function parseCsv(value: string | undefined, fallback: string[]): string[] {
@@ -118,6 +152,17 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed) || parsed < 1) {
     return fallback;
+  }
+  return parsed;
+}
+
+function parseOptionalPositiveInt(value: string | undefined): number | null {
+  if (!value || !value.trim()) {
+    return null;
+  }
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return null;
   }
   return parsed;
 }

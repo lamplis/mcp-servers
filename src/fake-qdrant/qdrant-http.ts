@@ -7,6 +7,7 @@ import {
   PointNotFoundError,
   Store,
   type QueryHit,
+  type PointRecord,
 } from "./store.js";
 import { toLogger, type Logger } from "./logger.js";
 import { ProcessLockBusyError } from "./disk-gate.js";
@@ -17,6 +18,11 @@ import {
 } from "./payload-hygiene.js";
 import { FAKE_QDRANT_SIDECAR } from "./config.js";
 import type { InstanceInfo } from "@modelcontextprotocol/mcp-lifecycle";
+import {
+  EmbeddingError,
+  EMBEDDING_NOT_CONFIGURED,
+  type EmbeddingProvider,
+} from "./provider.js";
 
 export interface QdrantHttpServerOptions {
   store: Store;
@@ -29,6 +35,7 @@ export interface QdrantHttpServerOptions {
   slowRequestMs?: number;
   flagPayloadPatterns?: string[];
   strictCreate?: boolean;
+  embeddingProvider?: EmbeddingProvider | null;
 }
 
 interface HttpRequestLog {
@@ -100,7 +107,8 @@ export async function startQdrantHttpServer(
         deleteDedup,
         recentlyDeleted,
         identity,
-        options.strictCreate === true
+        options.strictCreate === true,
+        options.embeddingProvider ?? null
       );
     } catch (error) {
       if (error instanceof ProcessLockBusyError) {
@@ -140,6 +148,13 @@ export async function startQdrantHttpServer(
         sendJson(
           res,
           404,
+          { status: { error: error.message } },
+          requestLog
+        );
+      } else if (error instanceof EmbeddingError) {
+        sendJson(
+          res,
+          502,
           { status: { error: error.message } },
           requestLog
         );
@@ -349,7 +364,6 @@ function pruneDedup(map: Map<string, number>, now: number): void {
 const UNSUPPORTED_QUERY_BODY_FIELDS = [
   "prefetch",
   "using",
-  "params",
   "lookup_from",
   "shard_key",
 ] as const;
@@ -376,9 +390,10 @@ export type WithPayloadSpec =
   | { mode: "exclude"; keys: string[] };
 
 export interface ParsedQueryRequest {
-  kind: "vector" | "id" | "list";
+  kind: "vector" | "id" | "list" | "text";
   vector?: number[];
   id?: string | number;
+  text?: string;
   limit: number;
   offset: number;
   scoreThreshold?: number;
@@ -502,26 +517,36 @@ export function parseQueryRequest(
   let kind: ParsedQueryRequest["kind"] = "list";
   let vector: number[] | undefined;
   let id: string | number | undefined;
+  let text: string | undefined;
   const query = record.query;
 
   if (isNumericArray(query)) {
     kind = "vector";
     vector = query;
-  } else if (typeof query === "number" || typeof query === "string") {
+  } else if (typeof query === "number") {
+    kind = "id";
+    id = query;
+  } else if (typeof query === "string") {
     kind = "id";
     id = query;
   } else if (isRecord(query)) {
-    if (query.nearest !== undefined) {
-      if (isNumericArray(query.nearest)) {
-        kind = "vector";
-        vector = query.nearest;
-      } else if (typeof query.nearest === "number" || typeof query.nearest === "string") {
-        kind = "id";
-        id = query.nearest;
-      } else if (isRecord(query.nearest) && isNumericArray(query.nearest.vector)) {
-        kind = "vector";
-        vector = query.nearest.vector;
-      }
+    const nearestText = inferenceText(query.nearest);
+    const queryText = inferenceText(query);
+    if (isNumericArray(query.nearest)) {
+      kind = "vector";
+      vector = query.nearest;
+    } else if (typeof query.nearest === "number" || typeof query.nearest === "string") {
+      kind = "id";
+      id = query.nearest;
+    } else if (nearestText) {
+      kind = "text";
+      text = nearestText;
+    } else if (isRecord(query.nearest) && isNumericArray(query.nearest.vector)) {
+      kind = "vector";
+      vector = query.nearest.vector;
+    } else if (queryText) {
+      kind = "text";
+      text = queryText;
     } else if (isNumericArray(query.vector)) {
       kind = "vector";
       vector = query.vector;
@@ -538,7 +563,7 @@ export function parseQueryRequest(
     }
   }
 
-  if (options.requireVector && kind !== "vector") {
+  if (options.requireVector && kind !== "vector" && kind !== "text") {
     throw new Error("missing query vector");
   }
 
@@ -550,6 +575,7 @@ export function parseQueryRequest(
     kind,
     vector,
     id,
+    text,
     limit: Math.max(1, finiteNumber(record.limit ?? record.top, 10)),
     offset: Math.max(0, finiteNumber(record.offset, 0)),
     scoreThreshold: parsedThreshold !== undefined && Number.isFinite(parsedThreshold) ? parsedThreshold : undefined,
@@ -562,7 +588,8 @@ export function parseQueryRequest(
 async function runParsedQuery(
   store: Store,
   collectionName: string,
-  parsed: ParsedQueryRequest
+  parsed: ParsedQueryRequest,
+  provider: EmbeddingProvider | null
 ): Promise<QueryHit[]> {
   const options = {
     limit: parsed.limit,
@@ -571,6 +598,10 @@ async function runParsedQuery(
     filter: parsed.filter,
     withVector: parsed.withVector,
   };
+  if (parsed.kind === "text") {
+    const vector = await embedText(provider, parsed.text ?? "");
+    return store.query(collectionName, vector, options);
+  }
   if (parsed.kind === "list") {
     return store.listByIds(collectionName, options);
   }
@@ -584,6 +615,86 @@ async function runParsedQuery(
     throw new Error("missing query vector");
   }
   return store.query(collectionName, parsed.vector, options);
+}
+
+function inferenceText(value: unknown): string | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  return typeof value.text === "string" && value.text.length > 0 ? value.text : undefined;
+}
+
+async function embedText(
+  provider: EmbeddingProvider | null,
+  text: string
+): Promise<number[]> {
+  if (!provider) {
+    throw new Error(EMBEDDING_NOT_CONFIGURED);
+  }
+  const result = await provider.embed([text]);
+  const vector = result.embeddings[0];
+  if (!vector || vector.length === 0) {
+    throw new EmbeddingError("empty embedding response");
+  }
+  return vector;
+}
+
+async function embedUpsertPoints(
+  points: Array<Record<string, unknown>>,
+  provider: EmbeddingProvider | null
+): Promise<PointRecord[]> {
+  const texts: string[] = [];
+  const textIndexes: number[] = [];
+  const resolved: PointRecord[] = [];
+
+  for (let i = 0; i < points.length; i += 1) {
+    const point = points[i];
+    if (!point || !("id" in point)) {
+      throw new Error("each point must include id and vector");
+    }
+    const id = point.id;
+    if (typeof id !== "string" && typeof id !== "number") {
+      throw new Error("each point must include id and vector");
+    }
+    if (Array.isArray(point.vector)) {
+      if (
+        !isNumericArray(point.vector) ||
+        point.vector.some((value) => !Number.isFinite(value))
+      ) {
+        throw new Error("vectors must contain finite numbers");
+      }
+      resolved[i] = { id, vector: point.vector, payload: point.payload ?? null };
+      continue;
+    }
+    const fromVector = inferenceText(point.vector);
+    const fromText = typeof point.text === "string" ? point.text : undefined;
+    const text = fromVector ?? fromText;
+    if (!text) {
+      throw new Error("each point must include id and vector");
+    }
+    textIndexes.push(i);
+    texts.push(text);
+    resolved[i] = { id, vector: [], payload: point.payload ?? null };
+  }
+
+  if (texts.length > 0) {
+    if (!provider) {
+      throw new Error(EMBEDDING_NOT_CONFIGURED);
+    }
+    const result = await provider.embed(texts);
+    for (let i = 0; i < textIndexes.length; i += 1) {
+      const index = textIndexes[i] ?? 0;
+      const vector = result.embeddings[i];
+      if (!vector || vector.length === 0) {
+        throw new EmbeddingError("empty embedding response");
+      }
+      const existing = resolved[index];
+      if (existing) {
+        existing.vector = vector;
+      }
+    }
+  }
+  return resolved.filter((item): item is PointRecord => Boolean(item));
 }
 
 function payloadOpResult(operationId: number): Record<string, unknown> {
@@ -625,7 +736,8 @@ async function handleRequest(
       startedAt: string;
       dataDir?: string;
     },
-    strictCreate: boolean
+    strictCreate: boolean,
+    embeddingProvider: EmbeddingProvider | null
   ) {
   const json = (status: number, payload: unknown) =>
     sendJson(res, status, payload, requestLog);
@@ -801,35 +913,16 @@ async function handleRequest(
       return json(400, { status: { error: "missing points[]" } });
     }
 
-    for (const point of points) {
-      if (!("id" in point) || !Array.isArray(point.vector)) {
-        return json(400, {
-          status: { error: "each point must include id and vector" },
-        });
-      }
-      if (
-        point.vector.some(
-          (value: unknown) => value == null || !Number.isFinite(value as number)
-        )
-      ) {
-        return json(400, {
-          status: { error: "vectors must contain finite numbers" },
-        });
-      }
-    }
-
     try {
-      await store.upsertPoints(collectionName, points);
+      const resolved = await embedUpsertPoints(points, embeddingProvider);
+      await store.upsertPoints(collectionName, resolved);
       return json(200, {
         result: { operation_id: 0, status: "completed" },
         status: "ok",
         time: 0,
       });
     } catch (error) {
-      rethrowIfBusy(error);
-      return json(400, {
-        status: { error: error instanceof Error ? error.message : String(error) },
-      });
+      return queryHttpError(error, json);
     }
   }
 
@@ -868,7 +961,7 @@ async function handleRequest(
       const result = [];
       for (const item of searches) {
         const parsed = parseQueryRequest(item);
-        const hits = await runParsedQuery(store, collectionName, parsed);
+        const hits = await runParsedQuery(store, collectionName, parsed, embeddingProvider);
         result.push({
           points: hits.map((hit) =>
             shapeScoredPoint(hit, parsed.withPayload, parsed.withVector)
@@ -891,7 +984,7 @@ async function handleRequest(
       const result = [];
       for (const item of searches) {
         const parsed = parseQueryRequest(item, { requireVector: true });
-        const hits = await runParsedQuery(store, collectionName, parsed);
+        const hits = await runParsedQuery(store, collectionName, parsed, embeddingProvider);
         result.push(hits.map((hit) => shapeScoredPoint(hit, parsed.withPayload, parsed.withVector)));
       }
       return json(200, { result, status: "ok", time: 0 });
@@ -904,7 +997,7 @@ async function handleRequest(
     const body = requestLog.reqBody as any;
     try {
       const parsed = parseQueryRequest(body);
-      const hits = await runParsedQuery(store, collectionName, parsed);
+      const hits = await runParsedQuery(store, collectionName, parsed, embeddingProvider);
       return json(200, {
         result: {
           points: hits.map((hit) =>
@@ -923,7 +1016,7 @@ async function handleRequest(
     const body = requestLog.reqBody as any;
     try {
       const parsed = parseQueryRequest(body, { requireVector: true });
-      const hits = await runParsedQuery(store, collectionName, parsed);
+      const hits = await runParsedQuery(store, collectionName, parsed, embeddingProvider);
       return json(200, {
         result: hits.map((hit) =>
           shapeScoredPoint(hit, parsed.withPayload, parsed.withVector)
@@ -1142,9 +1235,13 @@ function queryHttpError(
     json(404, { status: { error: error.message } });
     return;
   }
+  if (error instanceof EmbeddingError) {
+    json(502, { status: { error: error.message } });
+    return;
+  }
   const message = error instanceof Error ? error.message : String(error);
-  if (message === "missing query vector") {
-    json(400, { status: { error: "missing query vector" } });
+  if (message === "missing query vector" || message === EMBEDDING_NOT_CONFIGURED) {
+    json(400, { status: { error: message } });
     return;
   }
   json(400, { status: { error: message } });

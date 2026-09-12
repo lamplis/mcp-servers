@@ -80,7 +80,12 @@ export class OpenAIEmbedder implements Embedder {
 
         if (response.ok) {
           const data = (await response.json()) as OpenAIEmbeddingResponse;
-          return data.data.map((d) => new Float32Array(d.embedding));
+          const vectors = data.data.map((d) => new Float32Array(d.embedding));
+          const got = vectors[0]?.length;
+          if (got != null && got !== this.dim) {
+            throw new Error(`Embedding dimension mismatch: expected ${this.dim}, got ${got}`);
+          }
+          return vectors;
         }
 
         // Handle rate limiting (429) with retry
@@ -128,6 +133,9 @@ export class OpenAIEmbedder implements Embedder {
       } catch (error) {
         if (error instanceof Error && error.message.startsWith('Embeddings API error')) {
           // If it's an HTTP error, don't retry (already handled above)
+          throw error;
+        }
+        if (error instanceof Error && error.message.startsWith('Embedding dimension mismatch')) {
           throw error;
         }
 
@@ -362,6 +370,51 @@ export function getEmbeddingDimension(): number {
   return CONFIG.OPENAI_EMBED_DIM;
 }
 
+export function getEmbedderStatus(): {
+  provider: string;
+  model: string;
+  dim: number;
+  ready: boolean;
+  reason: string | null;
+} {
+  const provider = CONFIG.EMBEDDINGS_PROVIDER;
+  if (provider === 'local') {
+    return {
+      provider,
+      model: CONFIG.LOCAL_EMBED_MODEL,
+      dim: CONFIG.LOCAL_EMBED_DIM,
+      ready: true,
+      reason: null,
+    };
+  }
+  if (provider === 'tei') {
+    return {
+      provider,
+      model: 'tei',
+      dim: CONFIG.OPENAI_EMBED_DIM,
+      ready: Boolean(CONFIG.TEI_ENDPOINT),
+      reason: CONFIG.TEI_ENDPOINT ? null : 'TEI_ENDPOINT missing',
+    };
+  }
+  if (provider === 'openai') {
+    const ready = Boolean(CONFIG.OPENAI_EMBED_API_KEY || CONFIG.OPENAI_API_KEY);
+    return {
+      provider,
+      model: CONFIG.OPENAI_EMBED_MODEL,
+      dim: CONFIG.OPENAI_EMBED_DIM,
+      ready,
+      reason: ready ? null : 'OPENAI_EMBED_API_KEY missing',
+    };
+  }
+  return {
+    provider,
+    model: CONFIG.LOCAL_EMBED_MODEL,
+    dim: CONFIG.LOCAL_EMBED_DIM,
+    ready: true,
+    reason: null,
+  };
+}
+
 export function getEmbedder(): Embedder {
   if (CONFIG.EMBEDDINGS_PROVIDER === 'local') {
     return new LocalEmbedder();
@@ -371,7 +424,7 @@ export function getEmbedder(): Embedder {
   }
   if (CONFIG.EMBEDDINGS_PROVIDER === 'openai') {
     if (!(CONFIG.OPENAI_EMBED_API_KEY || CONFIG.OPENAI_API_KEY)) {
-      console.warn('OPENAI_EMBED_API_KEY missing; using no-op embedder');
+      console.error('OPENAI_EMBED_API_KEY missing; using no-op embedder (keyword-only index)');
       return new NoOpEmbedder();
     }
     return new OpenAIEmbedder();

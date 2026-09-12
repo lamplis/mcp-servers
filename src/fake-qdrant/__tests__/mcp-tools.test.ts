@@ -1,8 +1,26 @@
 import { afterEach, describe, expect, it } from "vitest";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { createServer } from "../server.js";
+import { createServer, resolveQueryVector, resolveToolPoints } from "../server.js";
 import { resolveDataDir } from "../store.js";
+import { EMBEDDING_NOT_CONFIGURED, type EmbeddingProvider } from "../provider.js";
+
+const stubProvider: EmbeddingProvider = {
+  mode: "external",
+  model: "bge-m3",
+  dimensions: 3,
+  describe: () => ({
+    mode: "external",
+    model: "bge-m3",
+    baseUrlHost: "stub.example",
+    dim: 3,
+  }),
+  embed: async (texts) => ({
+    model: "bge-m3",
+    embeddings: texts.map(() => [1, 0, 0]),
+    dimensions: 3,
+  }),
+};
 
 describe("fake-qdrant MCP factory", () => {
   let testDataDir: string;
@@ -38,5 +56,45 @@ describe("fake-qdrant MCP factory", () => {
     const stats = await created.store.getCollectionStats("mcp");
     expect(stats[0]?.pointsCount).toBe(1);
     expect(stats[0]?.jsonlLines).toBeGreaterThanOrEqual(1);
+  });
+
+  it("exposes embedding info on the created server", async () => {
+    testDataDir = path.join(
+      resolveDataDir(),
+      `mcp-embed-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    );
+    await fs.mkdir(testDataDir, { recursive: true });
+    const created = await createServer({
+      dataDir: testDataDir,
+      embeddingProvider: stubProvider,
+    });
+    cleanup = created.cleanup;
+    storeClose = () => created.store.close();
+    expect(created.embeddingProvider?.describe()).toEqual({
+      mode: "external",
+      model: "bge-m3",
+      baseUrlHost: "stub.example",
+      dim: 3,
+    });
+  });
+
+  it("embeds query text and upserts text points through the MCP helpers", async () => {
+    const vector = await resolveQueryVector(undefined, "hello", stubProvider);
+    expect(vector).toEqual([1, 0, 0]);
+    const resolved = await resolveToolPoints(
+      [{ id: 1, text: "hello", payload: { path: "/a" } }],
+      stubProvider
+    );
+    expect(resolved.embeddedCount).toBe(1);
+    expect(resolved.points[0]?.vector).toEqual([1, 0, 0]);
+  });
+
+  it("errors when text is used without a provider", async () => {
+    await expect(resolveQueryVector(undefined, "hello", null)).rejects.toThrow(
+      EMBEDDING_NOT_CONFIGURED
+    );
+    await expect(
+      resolveToolPoints([{ id: 1, text: "hello" }], null)
+    ).rejects.toThrow(EMBEDDING_NOT_CONFIGURED);
   });
 });

@@ -1,17 +1,18 @@
 # RooCode / Cursor MCP User Guide
 
-This guide covers the local MCP set in this repo: JSON-only storage, `npx` + Python launchers, no Docker, no SQLite, no admin installs.
+This guide covers the local MCP set in this repo: JSON-only storage, `node scripts/mcp-launch.mjs`, no Docker, no SQLite, no admin installs.
 
 Validated on this workstation (Node 22 / Node 20-compatible, Windows 11, no admin): all seven configured servers start over stdio, list tools, and answer a smoke `tools/call`. Fake Qdrant also serves `GET http://127.0.0.1:16333/healthz` during validation; production uses `:6333`. Local embeddings also serves `GET http://127.0.0.1:13100/healthz` during validation; production uses `:3100`.
 
 ## Prerequisites
 
-- **Node.js 20+** and **npx**
+- **Node.js 20+**
 - **Python 3** (only for `scripts/setup_roo.py`)
 - **RooCode** and/or **Cursor** in VS Code
+- Optional intranet embedder: `OPENAI_EMBED_*` in `.env` (see `.env.example`)
 - No Docker, WSL, SQLite binaries, or extra system installs
 
-Launchers allowed here: **npx** and **python** only.
+Launch every MCP with **`node scripts/mcp-launch.mjs <role>`** (never `npx`). `python scripts/setup_roo.py` only writes configs.
 
 `@xenova/transformers` lists native `sharp` (libvips) for image tensors. This repo overrides it with [`vendor/sharp-stub`](vendor/sharp-stub) (pure JS, no `.node`, no postinstall download). Text embeddings and docsearch work. Transformers.js image pipelines do not. Keep `ENABLE_IMAGE_TO_TEXT=false`. Do not vendor the real `sharp` binary.
 
@@ -22,10 +23,13 @@ From this repo:
 ```powershell
 cd C:\DEVHOME\GITHUB\mcp-servers
 npm install
+# Optional: copy .env.example → .env and fill OPENAI_EMBED_* (intranet bge-m3 / 1024)
 python scripts/setup_roo.py
 python scripts/setup_roo.py --check
 node scripts/validate_mcps.mjs
 ```
+
+`setup_roo.py` infers `--embeddings external` when `OPENAI_EMBED_BASE_URL` (or `FAKE_QDRANT_EMBEDDING_BASE_URL`) is in the process env or a repo-root `.env`. Otherwise it stays `local`. Pass `--embeddings local|external` to override. `--check` prints the profile with the API key masked and does not rewrite `mcp.json`.
 
 `.roo/mcp.json` and `.cursor/mcp.json` are **generated** (absolute paths) and not committed. After clone, run `python scripts/setup_roo.py`. That also creates:
 
@@ -123,7 +127,7 @@ These bind to loopback only. Stdio MCP still works if the port is already in use
 | Fake Qdrant REST shim | `FAKE_QDRANT_ENABLED=1`, `FAKE_QDRANT_HTTP_PORT=6333` | `http://127.0.0.1:6333/healthz` |
 | OpenAI-compatible embeddings | `EMBEDDINGS_HTTP_PORT=3100` | `http://127.0.0.1:3100/healthz` |
 
-Docsearch uses **in-process** local embeddings (`EMBEDDINGS_PROVIDER=local`). It does not need the embeddings HTTP sidecar.
+Docsearch embeds **in-process**. With `EMBEDDINGS_PROVIDER=local` it uses MiniLM from `model-cache/` (no `:3100` sidecar). With `EMBEDDINGS_PROVIDER=openai` it posts to `OPENAI_EMBED_BASE_URL/embeddings` (same block as fake-qdrant). The `:3100` sidecar is only for custom vectors and the **local** Roo Codebase Indexing profile.
 
 ## Available Servers
 
@@ -131,17 +135,18 @@ Docsearch uses **in-process** local embeddings (`EMBEDDINGS_PROVIDER=local`). It
 |--------|---------|
 | `central-memory` | Knowledge graph for persistent storage |
 | `central-filesystem` | File operations outside the workspace |
-| `central-docsearch` | Documentation search (local embeddings, JSON index) |
+| `central-docsearch` | Documentation search (JSON index; local MiniLM or OpenAI-compatible) |
 | `central-sequentialthinking` | Complex reasoning and problem-solving |
-| `central-fake-qdrant` | Local vector store (JSONL, brute-force cosine) |
-| `central-local-embeddings` | Local/offline text embeddings (no API key) |
+| `central-fake-qdrant` | Local vector store (JSONL, HTTP `:6333`, optional `text` embed) |
+| `central-local-embeddings` | Local MiniLM embeddings + optional HTTP `:3100` |
 | `central-everything` | Demo/test server |
 
-## Local Embeddings
+## Local Embeddings (MCP sidecar)
 
 - No API key. Transformers.js on CPU (`Xenova/all-MiniLM-L6-v2`, 384 dimensions).
 - Offline after the first model download into `MODEL_CACHE_DIR` / `MODEL_ASSETS_DIR`.
 - Tools: `embeddings`, `prefetch_model`, `health`.
+- Use this for ad-hoc 384-d vectors, or skip it when fake-qdrant’s **external** provider is configured and you upsert with `text`.
 
 Prefetch once while you still have access to the model files (GitHub / internal cache):
 
@@ -150,11 +155,37 @@ Use prefetch_model
 Use embeddings with input "Hello world"
 ```
 
-## RooCode codebase indexing (OpenAI-compatible local embedder)
+## RooCode codebase indexing (recommended: intranet embedder)
 
-Point RooCode at the **local-embeddings HTTP sidecar**, not at `api.openai.com`. `central-local-embeddings` must be running with `EMBEDDINGS_HTTP_PORT=3100` (already in `.roo/mcp.json` after `python scripts/setup_roo.py`). Confirm with `GET http://127.0.0.1:3100/healthz`.
+This is the profile that makes **`codebase_search`** work against fake-qdrant. Roo embeds **client-side** in Codebase Indexing settings (not in `mcp.json`). Fake-qdrant must accept Roo’s real query body (`query: number[]`, `params`, `with_payload.include`, `must_not` metadata) — that is already implemented on the HTTP shim at `:6333`.
 
-Fill RooCode's OpenAI-compatible provider as:
+| Field | Value |
+|-------|--------|
+| Base URL | `https://server.com/v1/openai` |
+| API key | from your `.env` `OPENAI_EMBED_API_KEY` (never commit it) |
+| Model | `bge-m3` |
+| Dimensions | `1024` |
+| Qdrant URL | `http://127.0.0.1:6333` |
+
+`python scripts/setup_roo.py` writes the same `OPENAI_EMBED_*` block into `central-docsearch` (`EMBEDDINGS_PROVIDER=openai`) and `FAKE_QDRANT_EMBEDDING_*` into `central-fake-qdrant` when `OPENAI_EMBED_BASE_URL` is set (or pass `--embeddings external`). `--check` prints the profile with the key masked.
+
+Roo recreates the Qdrant collection when `config.params.vectors.size` does not match (DELETE + PUT). After switching to 1024, let it re-index. Switching docsearch dimensions wipes the JSON index (`index.dim_mismatch`) — then run `doc-ingest { "source": "all", "force": true }`.
+
+Confirm the API is reachable directly (no PAC; Node does not follow WPAD). On this host the embedder is a direct intranet call:
+
+```powershell
+Invoke-WebRequest -NoProxy -Method Post https://server.com/v1/openai/embeddings `
+  -Headers @{ Authorization = "Bearer $env:OPENAI_EMBED_API_KEY"; "Content-Type" = "application/json" } `
+  -Body '{"model":"bge-m3","input":["ping"]}'
+```
+
+Expect a 1024-d vector. Then `python scripts/setup_roo.py`, `node scripts/mcp-ps.mjs doctor`, restart MCP servers in Roo, and set Codebase Indexing to this table.
+
+MCP/HTTP `text` on fake-qdrant is for **our** tools (`fake_qdrant_upsert_points` / `query: { text }`). Roo `codebase_search` never sends text; it sends a 1024-d vector.
+
+## RooCode codebase indexing (fallback: local MiniLM sidecar)
+
+Point RooCode at the **local-embeddings HTTP sidecar**, not at `api.openai.com`. `central-local-embeddings` must be running with `EMBEDDINGS_HTTP_PORT=3100`. Confirm with `GET http://127.0.0.1:3100/healthz`.
 
 | Field | Value |
 |-------|--------|
@@ -162,14 +193,15 @@ Fill RooCode's OpenAI-compatible provider as:
 | API key | `local` (the sidecar does not validate it; it must be non-empty if RooCode requires a key) |
 | Model | `Xenova/all-MiniLM-L6-v2` |
 | Dimensions | `384` |
+| Qdrant URL | `http://127.0.0.1:6333` |
 
-Qdrant (fake-qdrant on `http://127.0.0.1:6333`): create the index collection at **384 / Cosine**. Do not use 1536 or 3072 with this embedder.
+Create the index collection at **384 / Cosine**. Do not mix this collection with 1024-d `bge-m3` vectors.
 
-If RooCode still lists cloud OpenAI models, do **not** pick them on this workstation:
+If RooCode still lists cloud OpenAI models, do **not** pick them unless that API is actually reachable:
 
 | Model | Dim | Notes |
 |-------|-----|--------|
-| text-embedding-3-small | 1536 | Only if a real OpenAI-compatible API is reachable. Worst fit vs local MiniLM. |
+| text-embedding-3-small | 1536 | Only if a real OpenAI-compatible API is reachable. |
 | text-embedding-ada-002 | 1536 | Same width as 3-small; older. |
 | text-embedding-3-large | 3072 | Avoid. Doubles JSONL/RAM/brute-force CPU in fake-qdrant. |
 
@@ -177,9 +209,10 @@ If the Base URL field must be a host with no `/v1` suffix, use `http://127.0.0.1
 
 ## Docsearch
 
-- Hybrid search: keyword token overlap + cosine over local embeddings.
+- Hybrid search: keyword token overlap + cosine over local or OpenAI-compatible embeddings.
 - Watches `urls.md` and `docs/` under `DOCSEARCH_DATA_DIR`.
 - Index directory: `{DOCSEARCH_DATA_DIR}/index/` (JSON, not SQLite).
+- Changing `OPENAI_EMBED_DIM` / `LOCAL_EMBED_DIM` resets the index (`index.dim_mismatch`) so the next ingest re-embeds.
 
 Add files under `data/docsearch/docs/` and URLs in `data/docsearch/urls.md`, then:
 
@@ -259,11 +292,28 @@ Expected. Root `package.json` maps `sharp` to `vendor/sharp-stub`. After `npm in
 2. Confirm `MODEL_CACHE_DIR` is writable.
 3. Confirm files exist under `model-cache/`.
 
+### Roo `codebase_search` fails against fake-qdrant
+
+Roo sends `{ query: number[], params, with_payload: { include: [...] }, filter.must_not type=metadata }`. It does **not** send text.
+
+| Error | Cause | Fix |
+|-------|--------|-----|
+| `Unsupported query: params` | Stale `src/fake-qdrant/dist` still rejected `params` | `node node_modules/typescript/bin/tsc -p src/fake-qdrant`, then restart MCP (`node scripts/mcp-ps.mjs doctor`) |
+| `missing query vector` | Old dist only read `body.vector` / `query.vector` | Same rebuild; current shim accepts raw `query: number[]` |
+| Empty / wrong hits after switching embedder | Collection size ≠ Codebase Indexing dim | Let Roo DELETE+PUT the collection (1024 for `bge-m3`, 384 for MiniLM) and re-index |
+| HTTP 400 `Embedding provider not configured` on `query: { text }` | Expected: Roo never uses that shape. MCP `text` needs `FAKE_QDRANT_EMBEDDING_BASE_URL` | Set `OPENAI_EMBED_*` and re-run `python scripts/setup_roo.py` |
+
+Confirm `:6333` with `GET http://127.0.0.1:6333/healthz`. Collection size is in `GET /collections/{name}` → `config.params.vectors.size`.
+
 ## Environment Variables
 
 | Variable | Server | Description |
 |----------|--------|-------------|
 | `EMBEDDINGS_PROVIDER` | docsearch | `local` (default), `openai`, or `tei` |
+| `OPENAI_EMBED_BASE_URL` | docsearch + fake-qdrant | OpenAI-compatible base (no `/embeddings` suffix). Intranet: `https://server.com/v1/openai` |
+| `OPENAI_EMBED_MODEL` | docsearch + fake-qdrant | e.g. `bge-m3` |
+| `OPENAI_EMBED_DIM` | docsearch + fake-qdrant | e.g. `1024` |
+| `OPENAI_EMBED_API_KEY` | docsearch + fake-qdrant | Bearer token; never commit |
 | `DOCSEARCH_DATA_DIR` | docsearch | Data directory (`docs/`, `urls.md`, `index/`) |
 | `LOCAL_MODEL_CACHE_DIR` | docsearch | Transformers.js model cache |
 | `LOCAL_EMBED_MODEL` | docsearch | Default `Xenova/all-MiniLM-L6-v2` |
@@ -275,6 +325,12 @@ Expected. Root `package.json` maps `sharp` to `vendor/sharp-stub`. After `npm in
 | `FAKE_QDRANT_HTTP_HOST` | fake-qdrant | HTTP bind host (default `127.0.0.1`) |
 | `FAKE_QDRANT_HTTP_PORT` | fake-qdrant | HTTP API port (default: 6333) |
 | `FAKE_QDRANT_DATA_DIR` | fake-qdrant | JSONL collection directory |
+| `FAKE_QDRANT_EMBEDDING_PROVIDER` | fake-qdrant | `local` or `external` (inferred from base URL if unset) |
+| `FAKE_QDRANT_EMBEDDING_BASE_URL` | fake-qdrant | Falls back to `OPENAI_EMBED_BASE_URL` |
+| `FAKE_QDRANT_EMBEDDING_MODEL` | fake-qdrant | Falls back to `OPENAI_EMBED_MODEL` |
+| `FAKE_QDRANT_EMBEDDING_DIM` | fake-qdrant | Falls back to `OPENAI_EMBED_DIM` |
+| `FAKE_QDRANT_EMBEDDING_API_KEY` | fake-qdrant | Falls back to `OPENAI_EMBED_API_KEY`; never logged |
+| `FAKE_QDRANT_EMBEDDING_TIMEOUT_MS` | fake-qdrant | Embedding HTTP timeout (default `30000`) |
 | `MODEL_ID` | local-embeddings | Default model (`Xenova/all-MiniLM-L6-v2`) |
 | `MODEL_CACHE_DIR` | local-embeddings | Model cache directory |
 | `MODEL_ASSETS_DIR` | local-embeddings | Alternate model assets directory |
@@ -289,9 +345,10 @@ After setup, this repo looks like:
 
 ```
 mcp-servers/
-├── .roo/mcp.json                 # RooCode MCP config (absolute cwd)
+├── .env.example                  # Shared OPENAI_EMBED_* + fake-qdrant fallbacks
+├── .roo/mcp.json                 # RooCode MCP config (absolute cwd, gitignored)
 ├── .cursor/mcp.json              # Cursor MCP config
-├── scripts/setup_roo.py          # Writes configs + --check
+├── scripts/setup_roo.py          # Writes configs + --embeddings + --check
 ├── scripts/validate_mcps.mjs     # Stdio + HTTP smoke test
 ├── data/fake-qdrant/             # JSONL collections
 ├── data/docsearch/

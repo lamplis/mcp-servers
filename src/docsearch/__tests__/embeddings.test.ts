@@ -45,6 +45,12 @@ const createMockResponse = (init: {
   };
 };
 
+function paddedEmbedding(first: number, dim = 1536): number[] {
+  const values = new Array(dim).fill(0);
+  values[0] = first;
+  return values;
+}
+
 describe('Embeddings', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -129,7 +135,7 @@ describe('Embeddings', () => {
         ok: true,
         status: 200,
         json: vi.fn().mockResolvedValue({
-          data: [{ embedding: [0.1, 0.2, 0.3] }, { embedding: [0.4, 0.5, 0.6] }],
+          data: [{ embedding: paddedEmbedding(0.1) }, { embedding: paddedEmbedding(0.4) }],
         }),
       });
       mockFetch.mockResolvedValue(mockResponse);
@@ -150,19 +156,24 @@ describe('Embeddings', () => {
 
       expect(result).toHaveLength(2);
       expect(result[0]).toBeInstanceOf(Float32Array);
-      expect(Array.from(result[0]!)).toEqual(
-        expect.arrayContaining([
-          expect.closeTo(0.1, 5),
-          expect.closeTo(0.2, 5),
-          expect.closeTo(0.3, 5),
-        ]),
-      );
-      expect(Array.from(result[1]!)).toEqual(
-        expect.arrayContaining([
-          expect.closeTo(0.4, 5),
-          expect.closeTo(0.5, 5),
-          expect.closeTo(0.6, 5),
-        ]),
+      expect(result[0]!.length).toBe(1536);
+      expect(result[0]![0]).toBeCloseTo(0.1, 5);
+      expect(result[1]![0]).toBeCloseTo(0.4, 5);
+    });
+
+    it('should reject embeddings whose length does not match OPENAI_EMBED_DIM', async () => {
+      const { OpenAIEmbedder } = await import('../ingest/embeddings.js');
+      const embedder = new OpenAIEmbedder();
+      const mockResponse = createMockResponse({
+        ok: true,
+        status: 200,
+        json: vi.fn().mockResolvedValue({
+          data: [{ embedding: [0.1, 0.2, 0.3] }],
+        }),
+      });
+      mockFetch.mockResolvedValue(mockResponse);
+      await expect(embedder.embed(['text1'])).rejects.toThrow(
+        'Embedding dimension mismatch: expected 1536, got 3',
       );
     });
 
@@ -213,7 +224,7 @@ describe('Embeddings', () => {
             ok: true,
             status: 200,
             json: vi.fn().mockResolvedValue({
-              data: [{ embedding: [0.1, 0.2, 0.3] }],
+              data: [{ embedding: paddedEmbedding(0.1) }],
             }),
           });
         }
@@ -262,7 +273,7 @@ describe('Embeddings', () => {
             ok: true,
             status: 200,
             json: vi.fn().mockResolvedValue({
-              data: [{ embedding: [0.1, 0.2, 0.3] }],
+              data: [{ embedding: paddedEmbedding(0.1) }],
             }),
           });
         }
@@ -330,7 +341,7 @@ describe('Embeddings', () => {
             ok: true,
             status: 200,
             json: vi.fn().mockResolvedValue({
-              data: [{ embedding: [0.1, 0.2, 0.3] }],
+              data: [{ embedding: paddedEmbedding(0.1) }],
             }),
           });
         }
@@ -532,6 +543,32 @@ describe('Embeddings', () => {
       const { getEmbedder, NoOpEmbedder } = await import('../ingest/embeddings.js');
       const embedder = getEmbedder();
       expect(embedder).toBeInstanceOf(NoOpEmbedder);
+    });
+
+    it('reports embedder readiness for openai without a key', async () => {
+      vi.doMock('../shared/config.js', () => ({
+        CONFIG: {
+          OPENAI_API_KEY: '',
+          OPENAI_BASE_URL: 'https://api.openai.com/v1',
+          OPENAI_EMBED_MODEL: 'bge-m3',
+          OPENAI_EMBED_DIM: 1024,
+          OPENAI_EMBED_BASE_URL: 'https://server.com/v1/openai',
+          OPENAI_EMBED_API_KEY: '',
+          TEI_ENDPOINT: '',
+          EMBEDDINGS_PROVIDER: 'openai',
+          LOCAL_EMBED_MODEL: 'Xenova/all-MiniLM-L6-v2',
+          LOCAL_EMBED_DIM: 384,
+        },
+      }));
+
+      const { getEmbedderStatus } = await import('../ingest/embeddings.js');
+      expect(getEmbedderStatus()).toEqual({
+        provider: 'openai',
+        model: 'bge-m3',
+        dim: 1024,
+        ready: false,
+        reason: 'OPENAI_EMBED_API_KEY missing',
+      });
     });
   });
 });

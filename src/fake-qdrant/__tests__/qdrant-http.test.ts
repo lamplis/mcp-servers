@@ -4,6 +4,7 @@ import { Store } from '../store.js';
 import { startQdrantHttpServer, QdrantHttpServerHandle, summarizeHttpBody } from '../qdrant-http.js';
 import { resolveDataDir } from '../store.js';
 import { acquireProcessLock, lockDirForDataDir } from '../disk-gate.js';
+import { EmbeddingError, type EmbeddingProvider } from '../provider.js';
 import fs from 'fs/promises';
 import path from 'path';
 
@@ -635,6 +636,80 @@ describe('Fake Qdrant HTTP API Integration Tests', () => {
       expect(filter.status).toBe(400);
       expect(filter.data.status.error).toMatch(/Unsupported filter: match.text/);
     });
+
+    it('ignores params, indexed_only, timeout, consistency, and wait', async () => {
+      const response = await httpRequest('POST', '/collections/test-collection/points/query', {
+        query: [1, 0, 0],
+        limit: 1,
+        params: { hnsw_ef: 128, exact: false },
+        indexed_only: true,
+        timeout: 5,
+        consistency: 'majority',
+        wait: true,
+      });
+      expect(response.status).toBe(200);
+      expect(queryHits(response.data)[0].id).toBe(1);
+    });
+
+    it('replays RooCode codebase_search query body', async () => {
+      await httpRequest('PUT', '/collections/roo-code', {
+        vectors: { size: 3, distance: 'Cosine' },
+      });
+      await httpRequest('PUT', '/collections/roo-code/points', {
+        points: [
+          {
+            id: 1,
+            vector: [1, 0, 0],
+            payload: {
+              filePath: 'src/a.ts',
+              codeChunk: 'export const x = 1',
+              startLine: 1,
+              endLine: 3,
+              pathSegments: ['src', 'a.ts'],
+              type: 'code',
+              extra: 'hidden',
+            },
+          },
+          {
+            id: 2,
+            vector: [0.9, 0.1, 0],
+            payload: { type: 'metadata', filePath: 'src/a.ts' },
+          },
+        ],
+      });
+
+      const response = await httpRequest('POST', '/collections/roo-code/points/query', {
+        query: [1, 0, 0],
+        filter: {
+          must: [{ key: 'pathSegments', match: { value: 'src' } }],
+          must_not: [{ key: 'type', match: { value: 'metadata' } }],
+        },
+        score_threshold: 0.5,
+        limit: 10,
+        params: { hnsw_ef: 128, exact: false },
+        with_payload: {
+          include: ['filePath', 'codeChunk', 'startLine', 'endLine', 'pathSegments'],
+        },
+      });
+      expect(response.status).toBe(200);
+      const hits = queryHits(response.data);
+      expect(hits.map((hit) => hit.id)).toEqual([1]);
+      expect(hits[0].payload).toEqual({
+        filePath: 'src/a.ts',
+        codeChunk: 'export const x = 1',
+        startLine: 1,
+        endLine: 3,
+        pathSegments: ['src', 'a.ts'],
+      });
+    });
+
+    it('returns 400 for query { text } when no embedding provider is configured', async () => {
+      const response = await httpRequest('POST', '/collections/test-collection/points/query', {
+        query: { text: 'hello' },
+      });
+      expect(response.status).toBe(400);
+      expect(response.data.status.error).toMatch(/Embedding provider not configured/);
+    });
   });
 
   describe('Points - Delete', () => {
@@ -1158,6 +1233,150 @@ describe('strict collection create', () => {
     const second = await put('dup');
     expect(second.status).toBe(409);
     expect(second.data.status.error).toMatch(/already exists/);
+  });
+});
+
+function stubEmbeddingProvider(
+  embed: EmbeddingProvider["embed"] = async (texts) => ({
+    model: "bge-m3",
+    embeddings: texts.map(() => [1, 0, 0]),
+    dimensions: 3,
+  })
+): EmbeddingProvider {
+  return {
+    mode: "external",
+    model: "bge-m3",
+    dimensions: 3,
+    describe: () => ({
+      mode: "external",
+      model: "bge-m3",
+      baseUrlHost: "stub",
+      dim: 3,
+    }),
+    embed,
+  };
+}
+
+describe("HTTP text inference via embedding provider", () => {
+  let server: QdrantHttpServerHandle | null = null;
+  let store: Store | null = null;
+  let testDataDir: string;
+  let testPort: number;
+  let baseUrl: string;
+
+  async function startWithProvider(provider: EmbeddingProvider | null) {
+    testDataDir = path.join(
+      resolveDataDir(),
+      `embed-${Date.now()}-${Math.random().toString(36).substring(7)}`
+    );
+    await fs.mkdir(testDataDir, { recursive: true });
+    store = await Store.create({ dataDir: testDataDir });
+    server = await startQdrantHttpServer({
+      store,
+      host: "127.0.0.1",
+      port: 0,
+      logger: () => {},
+      embeddingProvider: provider,
+    });
+    testPort = server.port;
+    baseUrl = `http://127.0.0.1:${testPort}`;
+  }
+
+  function httpRequest(
+    method: string,
+    urlPath: string,
+    body?: unknown
+  ): Promise<{ status: number; data: any }> {
+    return new Promise((resolve, reject) => {
+      const url = new URL(urlPath, baseUrl);
+      const payload = body === undefined ? undefined : JSON.stringify(body);
+      const req = http.request(
+        {
+          method,
+          hostname: url.hostname,
+          port: testPort,
+          path: url.pathname + url.search,
+          headers: {
+            "Content-Type": "application/json",
+            ...(payload ? { "Content-Length": Buffer.byteLength(payload) } : {}),
+          },
+        },
+        (res) => {
+          let data = "";
+          res.on("data", (chunk) => {
+            data += chunk.toString();
+          });
+          res.on("end", () => {
+            resolve({
+              status: res.statusCode || 500,
+              data: data ? JSON.parse(data) : {},
+            });
+          });
+        }
+      );
+      req.on("error", reject);
+      if (payload) {
+        req.write(payload);
+      }
+      req.end();
+    });
+  }
+
+  afterEach(async () => {
+    if (server) {
+      await server.close();
+    }
+    if (store) {
+      await store.close();
+    }
+    if (testDataDir) {
+      await fs.rm(testDataDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  it("embeds query { text } and upserts vector { text }", async () => {
+    await startWithProvider(stubEmbeddingProvider());
+    await httpRequest("PUT", "/collections/docs", {
+      vectors: { size: 3, distance: "Cosine" },
+    });
+    const upserted = await httpRequest("PUT", "/collections/docs/points", {
+      points: [
+        { id: 1, vector: { text: "hello" }, payload: { kind: "text" } },
+        { id: 2, vector: [0, 1, 0], payload: { kind: "numeric" } },
+      ],
+    });
+    expect(upserted.status).toBe(200);
+
+    const queried = await httpRequest("POST", "/collections/docs/points/query", {
+      query: { text: "hello", model: "bge-m3" },
+      with_payload: true,
+      limit: 2,
+    });
+    expect(queried.status).toBe(200);
+    expect(queried.data.result.points[0].id).toBe(1);
+
+    const nearest = await httpRequest("POST", "/collections/docs/points/query", {
+      query: { nearest: { text: "hello" } },
+      limit: 1,
+    });
+    expect(nearest.status).toBe(200);
+    expect(nearest.data.result.points[0].id).toBe(1);
+  });
+
+  it("returns 502 when the embedding provider fails", async () => {
+    await startWithProvider(
+      stubEmbeddingProvider(async () => {
+        throw new EmbeddingError("upstream down");
+      })
+    );
+    await httpRequest("PUT", "/collections/docs", {
+      vectors: { size: 3, distance: "Cosine" },
+    });
+    const response = await httpRequest("POST", "/collections/docs/points/query", {
+      query: { text: "hello" },
+    });
+    expect(response.status).toBe(502);
+    expect(response.data.status.error).toMatch(/embedding: upstream down/);
   });
 });
 

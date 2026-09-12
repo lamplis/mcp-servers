@@ -12,11 +12,12 @@ import {
   resolvePortContention,
   type InstanceInfo,
 } from "@modelcontextprotocol/mcp-lifecycle";
-import { loadConfig, FAKE_QDRANT_SIDECAR } from "./config.js";
+import { loadConfig, FAKE_QDRANT_SIDECAR, ConfigError } from "./config.js";
 import { createServer } from "./server.js";
 import { startQdrantHttpServer, type QdrantHttpServerHandle } from "./qdrant-http.js";
 import { createFileLogger } from "./logger.js";
 import { DiskGate } from "./disk-gate.js";
+import { createProvider } from "./provider.js";
 
 async function main() {
   const config = loadConfig();
@@ -75,6 +76,23 @@ async function main() {
     lockDir,
   };
 
+  let embeddingProvider = null;
+  try {
+    embeddingProvider = createProvider(config);
+    if (embeddingProvider) {
+      logger.info("embedding.provider", { ...embeddingProvider.describe() });
+    }
+  } catch (error) {
+    if (error instanceof ConfigError) {
+      logger.error("embedding.provider_error", {
+        message: error.message,
+      });
+      embeddingProvider = null;
+    } else {
+      throw error;
+    }
+  }
+
   const { server, store } = await createServer({
     dataDir: config.dataDir,
     logger,
@@ -83,6 +101,7 @@ async function main() {
     acquireLock: false,
     dropEmptyChunks: config.dropEmptyChunks,
     runtimeStatus,
+    embeddingProvider,
   });
   const transport = new StdioServerTransport();
   await server.connect(transport);
@@ -104,6 +123,7 @@ async function main() {
       slowRequestMs: config.slowRequestMs,
       flagPayloadPatterns: config.flagPayloadPatterns,
       strictCreate: config.strictCreate,
+      embeddingProvider,
     });
 
   if (config.httpEnabled) {

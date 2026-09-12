@@ -1,6 +1,8 @@
 # Local Embeddings MCP Server
 
-A Model Context Protocol (MCP) server that provides fully local, offline-capable text embeddings using [Transformers.js](https://huggingface.co/docs/transformers.js). This server enables AI assistants to generate semantic embeddings without requiring external API calls or network connectivity after initial model download.
+A Model Context Protocol (MCP) server that provides fully local, offline-capable text embeddings using [Transformers.js](https://huggingface.co/docs/transformers.js). Default model: `Xenova/all-MiniLM-L6-v2` (384-d).
+
+This sidecar is the **fallback** for Roo Codebase Indexing and ad-hoc 384-d vectors. The recommended Roo `codebase_search` profile is the intranet API (`bge-m3`, 1024-d) plus fake-qdrant `:6333` — see [ROOCODE-SETUP.md](../../ROOCODE-SETUP.md). Do not mix 384-d and 1024-d collections.
 
 ## Features
 

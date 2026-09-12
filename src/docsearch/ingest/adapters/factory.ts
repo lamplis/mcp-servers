@@ -9,6 +9,10 @@ export function createDatabaseAdapter(config?: Partial<JsonAdapterConfig>): Data
     embeddingDim:
       config?.embeddingDim ??
       (CONFIG.EMBEDDINGS_PROVIDER === 'local' ? CONFIG.LOCAL_EMBED_DIM : CONFIG.OPENAI_EMBED_DIM),
+    embeddingModel:
+      config?.embeddingModel ??
+      (CONFIG.EMBEDDINGS_PROVIDER === 'local' ? CONFIG.LOCAL_EMBED_MODEL : CONFIG.OPENAI_EMBED_MODEL),
+    embeddingProvider: config?.embeddingProvider ?? CONFIG.EMBEDDINGS_PROVIDER,
     ...(config?.diskGate ? { diskGate: config.diskGate } : {}),
   });
 }

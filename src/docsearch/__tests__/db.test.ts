@@ -43,6 +43,26 @@ describe('JSON index', () => {
       expect(chunks[0]?.content).toBe('searchable test content');
     });
 
+    it('resets the index when stored embeddingDim does not match config', async () => {
+      const id = await adapter.upsertDocument({
+        source: 'file',
+        uri: 'test://dim',
+        hash: 'hash-dim',
+        extra_json: null,
+      });
+      await adapter.insertChunks(id, [{ content: 'old vectors' }]);
+      await adapter.close();
+
+      const reopened = new JsonAdapter({ path: testDbPath, embeddingDim: 1024 });
+      await reopened.init();
+      try {
+        const docs = await reopened.findDocuments();
+        expect(docs).toHaveLength(0);
+      } finally {
+        await reopened.close();
+      }
+    });
+
     it('should use custom path when provided', async () => {
       const custom = new JsonAdapter({ path: './test/custom-index', embeddingDim: 512 });
       await custom.init();

@@ -30,9 +30,9 @@ These servers aim to demonstrate MCP features and the official SDKs.
 - **[Memory](src/memory)** - Knowledge graph-based persistent memory system.
 - **[Sequential Thinking](src/sequentialthinking)** - Dynamic and reflective problem-solving through thought sequences.
 - **[Time](src/time)** - Time and timezone conversion capabilities.
-- **[Docsearch](src/docsearch)** - Hybrid semantic + keyword search across local files and web documentation.
-- **[Fake Qdrant](src/fake-qdrant)** - Local Qdrant-compatible vector store using JSONL (no SQLite).
-- **[Local Embeddings](src/local-embeddings)** - Fully local/offline text embeddings using Transformers.js.
+- **[Docsearch](src/docsearch)** - Hybrid semantic + keyword search (local MiniLM or an OpenAI-compatible embedder).
+- **[Fake Qdrant](src/fake-qdrant)** - Local Qdrant-compatible JSONL store; HTTP `:6333` for RooCode `codebase_search`; optional server-side `text` embed.
+- **[Local Embeddings](src/local-embeddings)** - Offline Transformers.js embeddings (384-d MiniLM) and optional HTTP `:3100`.
 
 ## 🚀 RooCode Quick Setup
 
@@ -51,12 +51,14 @@ npm install
 ### 2. Write MCP config and data dirs
 
 ```powershell
+# Optional: copy .env.example → .env and set OPENAI_EMBED_* for the intranet embedder
 python scripts/setup_roo.py
+python scripts/setup_roo.py --embeddings external
 python scripts/setup_roo.py --check
 node scripts/validate_mcps.mjs
 ```
 
-That writes `.roo/mcp.json` and `.cursor/mcp.json` with absolute paths.
+That writes `.roo/mcp.json` and `.cursor/mcp.json` with absolute paths. `--embeddings external` is the default when `OPENAI_EMBED_BASE_URL` is in the process env or `.env`; otherwise the profile stays `local`. `--check` prints the profile with the API key masked.
 
 To copy into another project instead:
 
@@ -74,7 +76,7 @@ copy mcp-servers\docs\mcp-servers-rules.md <YOUR_PROJECT>\.roo\rules\mcp-servers
 | `<PROJECT_PATH>` | Your project's root path (for docsearch data) |
 | `<ALLOWED_PATH>` | Directory for filesystem access |
 
-Docsearch uses local embeddings by default (fully offline after the model is in `model-cache/`). No OpenAI key required.
+Docsearch and fake-qdrant share one `OPENAI_EMBED_*` block when you use the external profile (`bge-m3`, 1024-d). Without that URL they stay on local MiniLM (384-d, `model-cache/`). RooCode **Codebase Indexing** is a separate UI setting (not `mcp.json`); see [ROOCODE-SETUP.md](ROOCODE-SETUP.md).
 
 ### 4. Restart RooCode / Cursor
 
@@ -87,8 +89,8 @@ The rule file (`mcp-servers.md`) teaches the AI to:
 - Use **memory** for persistent storage across sessions
 - Use **filesystem** for cross-project file operations
 - Use **sequentialthinking** for complex reasoning
-- Use **local-embeddings** for custom vector operations
-- Use **fake-qdrant** for a local JSONL vector store
+- Use **local-embeddings** for custom 384-d vectors (or skip it when upserting `text` through fake-qdrant’s external provider)
+- Use **fake-qdrant** for a local JSONL vector store (HTTP `:6333` for Roo `codebase_search`)
 
 📖 **Full setup and validation guide:** [ROOCODE-SETUP.md](ROOCODE-SETUP.md)
 
@@ -99,7 +101,8 @@ The rule file (`mcp-servers.md`) teaches the AI to:
 - npm (from the internal registry; this repo's `.npmrc` still points at `registry.npmjs.org` and must be overridden locally — `npx` will hang on the public registry)
 - Python 3 (for `scripts/setup_roo.py` only)
 - RooCode or Cursor extension installed
-- No API keys required (local embeddings work offline after model cache is populated)
+- Optional intranet embedder: `OPENAI_EMBED_BASE_URL`, `OPENAI_EMBED_MODEL`, `OPENAI_EMBED_DIM`, `OPENAI_EMBED_API_KEY` (see `.env.example`)
+- Local MiniLM works offline after `model-cache/` is populated (no API key)
 - No Docker, SQLite, or admin installs
 
 **Steps:**
@@ -108,6 +111,7 @@ The rule file (`mcp-servers.md`) teaches the AI to:
 3. Run `node scripts/validate_mcps.mjs` (`npm run validate:mcp`)
 4. Copy rules: `.roo/rules/mcp-servers.md` or `.cursor/rules/`
 5. Reload the IDE
+6. For Roo `codebase_search`: set Codebase Indexing to the same embedder (1024 / `bge-m3` or 384 / MiniLM) and Qdrant `http://127.0.0.1:6333`
 
 **Quick validation in chat after reload:**
 ```
@@ -118,8 +122,9 @@ doc-search { "query": "TypeScript 5 9 release notes", "latest": true, "topK": 5 
 **Environment variables (common):**
 - `DOCSEARCH_DATA_DIR` — docs, urls.md, and JSON `index/`
 - `DOCSEARCH_CRAWL_LIFETIME_DAYS` (optional)
-- `EMBEDDINGS_PROVIDER=local`
-- `FAKE_QDRANT_DATA_DIR`, `FAKE_QDRANT_HTTP_PORT`
+- `EMBEDDINGS_PROVIDER` — `local` or `openai`
+- `OPENAI_EMBED_BASE_URL`, `OPENAI_EMBED_MODEL`, `OPENAI_EMBED_DIM`, `OPENAI_EMBED_API_KEY` — shared by docsearch and fake-qdrant
+- `FAKE_QDRANT_DATA_DIR`, `FAKE_QDRANT_HTTP_PORT`, `FAKE_QDRANT_EMBEDDING_*`
 - `MODEL_CACHE_DIR`, `EMBEDDINGS_HTTP_PORT`
 
 ### Archived

@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-The Fake Qdrant MCP Server is a repository-local vector store for similarity search without Docker, WSL, SQLite, or an external Qdrant process. It runs through npm-managed Node.js (`node scripts/mcp-launch.mjs fake-qdrant`), persists each collection as `meta.json` + `points.jsonl`, and searches with brute-force cosine similarity in memory. Callers supply vectors on upsert (typically from local-embeddings or docsearch). An optional loopback HTTP shim exposes a subset of Qdrant-style collection and point APIs.
+The Fake Qdrant MCP Server is a repository-local vector store for similarity search without Docker, WSL, SQLite, or an external Qdrant process. It runs through npm-managed Node.js (`node scripts/mcp-launch.mjs fake-qdrant`), persists each collection as `meta.json` + `points.jsonl`, and searches with brute-force cosine similarity in memory. Callers supply vectors on upsert, or `text` when an OpenAI-compatible embedding provider is configured. An optional loopback HTTP shim exposes a subset of Qdrant-style collection and point APIs.
 
 ## Product Overview
 
@@ -48,7 +48,7 @@ Give local development a Qdrant-like collection and query surface that works on 
 5. **JSONL Persistence** - One directory per collection; append on upsert; compact rewrites a unique snapshot.
 6. **HTTP Shim** - Loopback Qdrant-like REST when `FAKE_QDRANT_ENABLED=1`.
 7. **Maintenance** - `fake_qdrant_compact_collection` and `fake_qdrant_persist_indexes`.
-8. **Optional embedding helper** - `provider.ts` can call a local or OpenAI-compatible HTTP embeddings API. MCP upsert still takes raw vectors; the helper is not the storage engine.
+8. **Optional embedding helper** - `provider.ts` calls a local or OpenAI-compatible HTTP embeddings API (`Authorization: Bearer` when a key is set). MCP `fake_qdrant_upsert_points` / `fake_qdrant_query_points` and HTTP `query: { text }` / `vector: { text }` use it. Missing provider is non-fatal at startup; text requests then return 400. `fake_qdrant_status` reports `{ mode, model, baseUrlHost, dim }`.
 9. **Daily file logs** - JSONL logs under `{dataDir}/logs/YYYY-MM-DD.log`, kept for 3 local days, so RooCode/VS Code HTTP and MCP failures can be reproduced from disk.
 10. **Single-writer robustness** - One in-process disk gate for all durable writes; per-collection mutation mutex; `{dataDir}/.write.lock` so a second process cannot rewrite the same JSONL. A new start with `MCP_TAKEOVER=1` verifies the holder (`instance.json` + `tasklist` + `/healthz` pid) and kills it; `MCP_TAKEOVER=0` exits immediately. HTTP `/healthz` returns `pid`/`instanceId`. Stdin close, transport close, SIGINT/SIGTERM, and uncaughtException all run one shutdown path that releases the lock and port. Launch via `node scripts/mcp-launch.mjs fake-qdrant`, never `npx tsx`.
 11. **RooCode HTTP dialect** - Nested payload filters, payload index stubs, honest point counts, query `{ points }`, scroll/retrieve/count, keyword postings, JSONL tombstones, truncated `codeChunk` logs.
@@ -82,12 +82,12 @@ Give local development a Qdrant-like collection and query surface that works on 
 - **Output**: Success flag
 
 #### `fake_qdrant_upsert_points`
-- **Input**: `collection`, `points` (`{ id, vector, payload? }[]`)
+- **Input**: `collection`, `points` (`{ id, vector?, text?, payload? }[]`)
 - **Output**: Number of upserted points
-- **Note**: Vectors are caller-supplied.
+- **Note**: Each point needs exactly one of `vector` or `text`. Text is batch-embedded when a provider is configured.
 
 #### `fake_qdrant_query_points`
-- **Input**: `collection`, `vector`, optional `limit`, optional `scoreThreshold`
+- **Input**: `collection`, exactly one of `vector` or `text`, optional `limit`, optional `scoreThreshold`
 - **Output**: Matching ids, scores, payloads
 
 #### `fake_qdrant_compact_collection`
@@ -135,7 +135,7 @@ Give local development a Qdrant-like collection and query surface that works on 
 | `POST` | `/collections/{name}/points/delete` | Delete by id or nested filter |
 | `POST` | `/collections/{name}/compact` | Rewrite unique JSONL snapshot |
 
-**Query shapes:** `query` as a number array, `{ nearest }`, nearest-by-id, or omitted (list by id, `score: 0`). Roo dialect `vector` / `query.vector` / `query.nearest.vector` still works. Default HTTP `limit` is 10; MCP `fake_qdrant_query_points` still defaults to 20. `score_threshold` has no implicit 0. `with_payload` defaults to false (boolean, include list, or `{include|exclude}`). Hits are `{ id, version, score, payload?, vector? }`.
+**Query shapes:** `query` as a number array, `{ nearest }`, nearest-by-id, omitted (list by id, `score: 0`), or inference `{ text, model? }` / `{ nearest: { text } }` (embedded when a provider is configured). Roo dialect `vector` / `query.vector` / `query.nearest.vector` still works. `params`, `indexed_only`, `timeout`, `consistency`, and `wait` are ignored. Default HTTP `limit` is 10; MCP `fake_qdrant_query_points` still defaults to 20. `score_threshold` has no implicit 0. `with_payload` defaults to false (boolean, include list, or `{include|exclude}`). Hits are `{ id, version, score, payload?, vector? }`. Upsert accepts numeric `vector` or `{ text, model? }`. Missing provider → 400; embedding HTTP failure → 502.
 
 **Filters:** `must` / `should` / `must_not` / `min_should`, `match.value|any|except` (array-element, type-strict), `range`, `datetime_range`, `has_id`, `is_empty`, `is_null`. Unsupported conditions return 400.
 
@@ -200,7 +200,10 @@ Give local development a Qdrant-like collection and query surface that works on 
 - `FAKE_QDRANT_LOG_LEVEL` - `debug` | `info` | `warn` | `error` (default `info`)
 - `FAKE_QDRANT_LOG_RETENTION_DAYS` - keep this many local calendar days of log files (default `3`)
 - `FAKE_QDRANT_STRICT_CREATE` - `1` makes `PUT /collections/{name}` return 409 when the name already exists (default stays idempotent for Roo)
-- Optional helper only (not used by MCP upsert): `FAKE_QDRANT_EMBEDDING_PROVIDER`, `FAKE_QDRANT_EMBEDDING_BASE_URL`, `FAKE_QDRANT_EMBEDDING_MODEL`, `FAKE_QDRANT_LOCAL_EMBEDDINGS_TARGET`
+- `FAKE_QDRANT_EMBEDDING_PROVIDER` - `local` or `external`. Unset with a base URL infers `external`; otherwise `local`.
+- `FAKE_QDRANT_EMBEDDING_BASE_URL` / `_MODEL` / `_API_KEY` / `_DIM` / `_TIMEOUT_MS` - OpenAI-compatible client. Each falls back to `OPENAI_EMBED_*` so one env block can serve fake-qdrant and docsearch. Direct intranet access (`node:http`/`node:https`); no PAC. If a host later requires the corporate proxy, an explicit proxy would have to be added.
+- `FAKE_QDRANT_LOCAL_EMBEDDINGS_TARGET` - local-mode base URL (default `http://127.0.0.1:3100`)
+- HTTP query ignores Qdrant tuning knobs `params`, `indexed_only`, `timeout`, `consistency`, `wait`. `prefetch` / `using` / `lookup_from` / `shard_key` / fusion-family objects still 400.
 
 Startup reads these through `loadConfig()` and passes `dataDir` / HTTP bind into the store and shim.
 

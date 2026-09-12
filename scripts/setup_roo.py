@@ -4,6 +4,8 @@
 Usage:
   python scripts/setup_roo.py
   python scripts/setup_roo.py --check
+  python scripts/setup_roo.py --embeddings external
+  python scripts/setup_roo.py --embeddings local
 """
 
 from __future__ import annotations
@@ -23,6 +25,113 @@ DATA_DOCSEARCH = REPO_ROOT / "data" / "docsearch"
 DATA_DOCSEARCH_DOCS = DATA_DOCSEARCH / "docs"
 MODEL_CACHE = REPO_ROOT / "model-cache"
 DEFAULT_MODEL = "Xenova/all-MiniLM-L6-v2"
+DEFAULT_EXTERNAL_MODEL = "bge-m3"
+DEFAULT_EXTERNAL_DIM = "1024"
+EMBED_ENV_KEYS = (
+    "OPENAI_EMBED_BASE_URL",
+    "OPENAI_EMBED_MODEL",
+    "OPENAI_EMBED_DIM",
+    "OPENAI_EMBED_API_KEY",
+    "FAKE_QDRANT_EMBEDDING_BASE_URL",
+    "FAKE_QDRANT_EMBEDDING_MODEL",
+    "FAKE_QDRANT_EMBEDDING_DIM",
+    "FAKE_QDRANT_EMBEDDING_API_KEY",
+    "FAKE_QDRANT_EMBEDDING_PROVIDER",
+)
+
+
+def parse_dotenv(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.is_file():
+        return values
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("export "):
+            stripped = stripped[7:].strip()
+        if "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        if key:
+            values[key] = value
+    return values
+
+
+def merged_embed_env() -> dict[str, str]:
+    file_env = parse_dotenv(REPO_ROOT / ".env")
+    merged: dict[str, str] = {}
+    for key in EMBED_ENV_KEYS:
+        if os.environ.get(key):
+            merged[key] = os.environ[key]
+        elif file_env.get(key):
+            merged[key] = file_env[key]
+    return merged
+
+
+def mask_secret(value: str | None) -> str:
+    if not value:
+        return "(unset)"
+    if len(value) <= 6:
+        return "****"
+    return f"{value[:2]}...{value[-2:]}"
+
+
+def resolve_embeddings_mode(cli: str | None) -> tuple[str, dict[str, str]]:
+    env = merged_embed_env()
+    base = env.get("OPENAI_EMBED_BASE_URL") or env.get("FAKE_QDRANT_EMBEDDING_BASE_URL")
+    if cli:
+        mode = cli
+    elif base:
+        mode = "external"
+    else:
+        mode = "local"
+    return mode, env
+
+
+def print_embeddings_profile(mode: str, env: dict[str, str]) -> None:
+    base = env.get("OPENAI_EMBED_BASE_URL") or env.get("FAKE_QDRANT_EMBEDDING_BASE_URL") or "(unset)"
+    model = (
+        env.get("OPENAI_EMBED_MODEL")
+        or env.get("FAKE_QDRANT_EMBEDDING_MODEL")
+        or DEFAULT_EXTERNAL_MODEL
+    )
+    dim = env.get("OPENAI_EMBED_DIM") or env.get("FAKE_QDRANT_EMBEDDING_DIM") or DEFAULT_EXTERNAL_DIM
+    key = env.get("OPENAI_EMBED_API_KEY") or env.get("FAKE_QDRANT_EMBEDDING_API_KEY")
+    print(f"embeddings profile: {mode}")
+    print(f"  OPENAI_EMBED_BASE_URL={base}")
+    print(f"  OPENAI_EMBED_MODEL={model}")
+    print(f"  OPENAI_EMBED_DIM={dim}")
+    print(f"  OPENAI_EMBED_API_KEY={mask_secret(key)}")
+
+
+def apply_embedding_env(servers: dict, mode: str, env: dict[str, str]) -> None:
+    if mode != "external":
+        return
+    base = env.get("OPENAI_EMBED_BASE_URL") or env.get("FAKE_QDRANT_EMBEDDING_BASE_URL") or ""
+    model = (
+        env.get("OPENAI_EMBED_MODEL")
+        or env.get("FAKE_QDRANT_EMBEDDING_MODEL")
+        or DEFAULT_EXTERNAL_MODEL
+    )
+    dim = env.get("OPENAI_EMBED_DIM") or env.get("FAKE_QDRANT_EMBEDDING_DIM") or DEFAULT_EXTERNAL_DIM
+    key = env.get("OPENAI_EMBED_API_KEY") or env.get("FAKE_QDRANT_EMBEDDING_API_KEY") or ""
+    doc = servers["central-docsearch"]["env"]
+    doc["EMBEDDINGS_PROVIDER"] = "openai"
+    doc["OPENAI_EMBED_BASE_URL"] = base
+    doc["OPENAI_EMBED_MODEL"] = model
+    doc["OPENAI_EMBED_DIM"] = str(dim)
+    doc["OPENAI_EMBED_API_KEY"] = key
+    fq = servers["central-fake-qdrant"]["env"]
+    fq["FAKE_QDRANT_EMBEDDING_PROVIDER"] = "external"
+    fq["FAKE_QDRANT_EMBEDDING_BASE_URL"] = base
+    fq["FAKE_QDRANT_EMBEDDING_MODEL"] = model
+    fq["FAKE_QDRANT_EMBEDDING_DIM"] = str(dim)
+    fq["FAKE_QDRANT_EMBEDDING_API_KEY"] = key
 
 
 def repo_path_for_json() -> str:
@@ -43,7 +152,13 @@ def launch_args(role: str, extra: list[str] | None = None) -> list[str]:
     return args
 
 
-def build_mcp_config(*, include_cwd: bool, filesystem_dir: str) -> dict:
+def build_mcp_config(
+    *,
+    include_cwd: bool,
+    filesystem_dir: str,
+    embeddings_mode: str = "local",
+    embed_env: dict[str, str] | None = None,
+) -> dict:
     cwd = repo_path_for_json()
     servers = {
         "central-memory": {
@@ -129,6 +244,7 @@ def build_mcp_config(*, include_cwd: bool, filesystem_dir: str) -> dict:
             "alwaysAllow": ["doc-search", "doc-ingest", "doc-ingest-status"],
         },
     }
+    apply_embedding_env(servers, embeddings_mode, embed_env or {})
     if include_cwd:
         for server in servers.values():
             server["cwd"] = cwd
@@ -243,10 +359,20 @@ def check_environment() -> int:
     return 0
 
 
-def write_configs() -> None:
+def write_configs(embeddings_mode: str, embed_env: dict[str, str]) -> None:
     filesystem_dir = filesystem_root()
-    roo_payload = build_mcp_config(include_cwd=True, filesystem_dir=filesystem_dir)
-    cursor_payload = build_mcp_config(include_cwd=False, filesystem_dir=filesystem_dir)
+    roo_payload = build_mcp_config(
+        include_cwd=True,
+        filesystem_dir=filesystem_dir,
+        embeddings_mode=embeddings_mode,
+        embed_env=embed_env,
+    )
+    cursor_payload = build_mcp_config(
+        include_cwd=False,
+        filesystem_dir=filesystem_dir,
+        embeddings_mode=embeddings_mode,
+        embed_env=embed_env,
+    )
     cursor_payload["mcpServers"]["mcp-docs"] = {
         "$comment": "External HTTP MCP docs (optional; may be blocked by firewall)",
         "type": "http",
@@ -263,13 +389,21 @@ def main() -> int:
         action="store_true",
         help="Verify Node/npx/Python and data dirs without rewriting configs",
     )
+    parser.add_argument(
+        "--embeddings",
+        choices=["local", "external"],
+        default=None,
+        help="Embedding profile written into mcp.json (default: external when OPENAI_EMBED_BASE_URL is set)",
+    )
     args = parser.parse_args()
+    embeddings_mode, embed_env = resolve_embeddings_mode(args.embeddings)
 
     ensure_dirs()
+    print_embeddings_profile(embeddings_mode, embed_env)
     if args.check:
         return check_environment()
 
-    write_configs()
+    write_configs(embeddings_mode, embed_env)
     print()
     print("Setup complete.")
     print("  1. From the repo root, run: python scripts/setup_roo.py --check")

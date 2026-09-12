@@ -19,6 +19,8 @@ import type { DocumentInput, ChunkInput } from '../../shared/types.js';
 export interface JsonAdapterConfig {
   readonly path: string;
   readonly embeddingDim: number;
+  readonly embeddingModel?: string;
+  readonly embeddingProvider?: string;
   readonly diskGate?: DiskGate;
 }
 
@@ -50,6 +52,8 @@ interface PersistedMeta {
   nextDocumentId: number;
   nextChunkId: number;
   embeddingDim: number;
+  embeddingModel?: string;
+  embeddingProvider?: string;
   kv: Record<string, string>;
 }
 
@@ -101,6 +105,26 @@ export class JsonAdapter implements DatabaseAdapter {
 
   private async load(): Promise<void> {
     const meta = await readJsonFile<PersistedMeta>(this.metaFile());
+    if (
+      meta &&
+      typeof meta.embeddingDim === 'number' &&
+      meta.embeddingDim > 0 &&
+      meta.embeddingDim !== this.config.embeddingDim
+    ) {
+      console.warn(
+        `index.dim_mismatch stored=${meta.embeddingDim} configured=${this.config.embeddingDim}; resetting index`,
+      );
+      this.nextDocumentId = 1;
+      this.nextChunkId = 1;
+      this.kv = new Map();
+      this.documents.clear();
+      this.documentsByUri.clear();
+      this.chunks.clear();
+      this.embeddings.clear();
+      this.dirty = true;
+      await this.persist();
+      return;
+    }
     if (meta) {
       this.nextDocumentId = meta.nextDocumentId ?? 1;
       this.nextChunkId = meta.nextChunkId ?? 1;
@@ -149,6 +173,12 @@ export class JsonAdapter implements DatabaseAdapter {
           embeddingDim: this.config.embeddingDim,
           kv: Object.fromEntries(this.kv),
         };
+        if (this.config.embeddingModel) {
+          meta.embeddingModel = this.config.embeddingModel;
+        }
+        if (this.config.embeddingProvider) {
+          meta.embeddingProvider = this.config.embeddingProvider;
+        }
         await writeJsonAtomic(this.metaFile(), meta);
         await writeJsonAtomic(this.documentsFile(), [...this.documents.values()]);
         await writeJsonAtomic(this.chunksFile(), [...this.chunks.values()]);

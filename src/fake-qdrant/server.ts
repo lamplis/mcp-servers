@@ -4,6 +4,7 @@ import type { DiskGate } from "./disk-gate.js";
 import { Store, type PointRecord } from "./store.js";
 import { matchFilter } from "./qdrant-filter.js";
 import type { EmbeddingProvider } from "./provider.js";
+import { EMBEDDING_NOT_CONFIGURED } from "./provider.js";
 import type { Logger } from "./logger.js";
 import type { InstanceInfo } from "@modelcontextprotocol/mcp-lifecycle";
 import type { ProcessLock } from "./disk-gate.js";
@@ -100,13 +101,14 @@ async function runLoggedTool<T>(
 function registerTools(
   server: McpServer,
   store: Store,
-  _embeddingProvider: EmbeddingProvider | null,
+  embeddingProvider: EmbeddingProvider | null,
   logger?: Logger,
   runtimeStatus?: FakeQdrantRuntimeStatus
 ) {
   const PointSchema = z.object({
     id: z.union([z.string(), z.number()]),
-    vector: z.array(z.number()),
+    vector: z.array(z.number()).optional(),
+    text: z.string().min(1).optional(),
     payload: z.any().optional(),
   });
 
@@ -128,6 +130,14 @@ function registerTools(
         lockDir: z.string().optional(),
         busy: z.boolean(),
         dataDir: z.string(),
+        embedding: z
+          .object({
+            mode: z.string(),
+            model: z.string(),
+            baseUrlHost: z.string(),
+            dim: z.number().nullable(),
+          })
+          .nullable(),
       },
     },
     async () =>
@@ -144,6 +154,7 @@ function registerTools(
           lockDir: runtimeStatus?.lockDir,
           busy: store.isBusy,
           dataDir: store.directory,
+          embedding: embeddingProvider ? embeddingProvider.describe() : null,
         };
         return {
           content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }],
@@ -333,7 +344,7 @@ function registerTools(
     {
       title: "Upsert points into fake Qdrant",
       description:
-        "Insert or update vector points in a collection. The latest upsert per id wins.",
+        "Insert or update vector points in a collection. The latest upsert per id wins. Provide vector or text (text is embedded when an embedding provider is configured).",
       inputSchema: {
         collection: z.string().describe("Collection name."),
         points: z
@@ -349,21 +360,23 @@ function registerTools(
         logger,
         "fake_qdrant_upsert_points",
         async () => {
-          await store.upsertPoints(collection, points as PointRecord[]);
+          const resolved = await resolveToolPoints(points, embeddingProvider);
+          await store.upsertPoints(collection, resolved.points as PointRecord[]);
           return {
             content: [
               {
                 type: "text" as const,
-                text: `Upserted ${points.length} point(s) into ${collection}`,
+                text: `Upserted ${resolved.points.length} point(s) into ${collection}`,
               },
             ],
-            structuredContent: { upserted: points.length },
+            structuredContent: { upserted: resolved.points.length },
           };
         },
         () => ({
           collection,
           upserted: points.length,
           ids: points.map((point) => point.id),
+          embeddedCount: points.filter((point) => typeof point.text === "string").length,
           vectorLength: points[0]?.vector?.length,
         })
       )
@@ -374,10 +387,15 @@ function registerTools(
     {
       title: "Query fake Qdrant collection",
       description:
-        "Run a vector similarity search against a collection (brute-force cosine). Default limit is 20 (tool-specific; HTTP Query API defaults to 10). scoreThreshold is optional with no implicit 0.",
+        "Run a vector similarity search against a collection (brute-force cosine). Default limit is 20 (tool-specific; HTTP Query API defaults to 10). scoreThreshold is optional with no implicit 0. Pass vector or text (text is embedded when a provider is configured).",
       inputSchema: {
         collection: z.string().describe("Collection name."),
-        vector: z.array(z.number()).describe("Query vector."),
+        vector: z.array(z.number()).optional().describe("Query vector."),
+        text: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Query text to embed when no vector is provided."),
         limit: z
           .number()
           .int()
@@ -415,12 +433,13 @@ function registerTools(
         ),
       },
     },
-    async ({ collection, vector, limit, offset, scoreThreshold, filter, withVector }) =>
+    async ({ collection, vector, text, limit, offset, scoreThreshold, filter, withVector }) =>
       runLoggedTool(
         logger,
         "fake_qdrant_query_points",
         async () => {
-          const results = await store.query(collection, vector, {
+          const queryVector = await resolveQueryVector(vector, text, embeddingProvider);
+          const results = await store.query(collection, queryVector, {
             limit: limit ?? 20,
             offset,
             scoreThreshold,
@@ -439,7 +458,8 @@ function registerTools(
         },
         (result) => ({
           collection,
-          vectorLength: vector.length,
+          vectorLength: vector?.length,
+          usedText: Boolean(text),
           limit: limit ?? 20,
           offset: offset ?? 0,
           scoreThreshold,
@@ -613,5 +633,82 @@ function registerTools(
         };
       })
   );
+}
+
+export async function resolveQueryVector(
+  vector: number[] | undefined,
+  text: string | undefined,
+  provider: EmbeddingProvider | null
+): Promise<number[]> {
+  const hasVector = Array.isArray(vector) && vector.length > 0;
+  const hasText = typeof text === "string" && text.length > 0;
+  if (hasVector === hasText) {
+    throw new Error("Provide exactly one of vector or text");
+  }
+  if (hasVector && vector) {
+    return vector;
+  }
+  if (!provider) {
+    throw new Error(EMBEDDING_NOT_CONFIGURED);
+  }
+  const result = await provider.embed([text ?? ""]);
+  const embedded = result.embeddings[0];
+  if (!embedded || embedded.length === 0) {
+    throw new Error("embedding: empty embedding response");
+  }
+  return embedded;
+}
+
+export async function resolveToolPoints(
+  points: Array<{
+    id: string | number;
+    vector?: number[];
+    text?: string;
+    payload?: unknown;
+  }>,
+  provider: EmbeddingProvider | null
+): Promise<{ points: PointRecord[]; embeddedCount: number }> {
+  const texts: string[] = [];
+  const indexes: number[] = [];
+  const resolved: PointRecord[] = [];
+  for (let i = 0; i < points.length; i += 1) {
+    const point = points[i];
+    if (!point) {
+      continue;
+    }
+    const hasVector = Array.isArray(point.vector) && point.vector.length > 0;
+    const hasText = typeof point.text === "string" && point.text.length > 0;
+    if (hasVector === hasText) {
+      throw new Error("Each point needs exactly one of vector or text");
+    }
+    if (hasVector && point.vector) {
+      resolved[i] = { id: point.id, vector: point.vector, payload: point.payload };
+      continue;
+    }
+    texts.push(point.text ?? "");
+    indexes.push(i);
+    resolved[i] = { id: point.id, vector: [], payload: point.payload };
+  }
+  if (texts.length > 0) {
+    if (!provider) {
+      throw new Error(EMBEDDING_NOT_CONFIGURED);
+    }
+    const result = await provider.embed(texts);
+    for (let i = 0; i < indexes.length; i += 1) {
+      const index = indexes[i] ?? 0;
+      const vector = result.embeddings[i];
+      if (!vector || vector.length === 0) {
+        throw new Error("embedding: empty embedding response");
+      }
+      const existing = resolved[index];
+      if (existing) {
+        existing.vector = vector;
+      }
+    }
+  }
+  return {
+    points: resolved.filter((item): item is PointRecord => Boolean(item)),
+    embeddedCount: texts.length,
+  };
 }
 

@@ -19,7 +19,7 @@ Pick **one primary MCP** before using shell, guessing APIs, or asking the user f
 | Path **outside** the current workspace, typically under `C:\DEVHOME` | `list_allowed_directories` | Then `search_files` / `read_text_file` / `directory_tree`. |
 | Path **inside** the current workspace | IDE file tools | Use filesystem MCP only when the IDE cannot reach the path. |
 | Architecture tradeoff, nasty bug, 3+ plausible designs, conflicting constraints | `sequentialthinking` (several calls) | Then execute with other MCPs. Thinking is not the deliverable. |
-| Similarity over **your** notes, error logs, snippets, ad-hoc corpus (not already in docsearch) | `health` → `embeddings` | `fake_qdrant_*` recipe below. |
+| Similarity over **your** notes, error logs, snippets, ad-hoc corpus (not already in docsearch) | `health` → `embeddings` **or** `fake_qdrant_*` with `text` | `fake_qdrant_*` recipe below. |
 | MCP process env / cwd / missing var | `get-env` on `central-everything` | Do not use other everything tools for real work. |
 
 **Parallelize independent calls** (status + search, search_nodes + doc-search).
@@ -109,11 +109,22 @@ Call **multiple times** (typically 4–8). Required fields every call: `thought`
 
 ### E. Custom vectors (embeddings + fake-qdrant)
 
-Use for **ad-hoc** corpora (pasted logs, a folder of notes that is not ingested into docsearch, clustering similar errors). Default model: `Xenova/all-MiniLM-L6-v2`, **384** dims, `normalize: true` (cosine).
+Use for **ad-hoc** corpora (pasted logs, a folder of notes that is not ingested into docsearch, clustering similar errors). Collection `size` **must** match the embedder: **1024** for `bge-m3`, **384** for local MiniLM.
+
+When the external provider is configured (`fake_qdrant_status` shows `embedding.mode`), prefer `text` so fake-qdrant embeds server-side:
+
+```
+fake_qdrant_status {}
+fake_qdrant_create_collection { "name": "error_logs", "size": 1024, "distance": "Cosine" }
+fake_qdrant_upsert_points { "collection": "error_logs", "points": [{ "id": "1", "text": "chunk 1", "payload": { "source": "build.log" } }] }
+fake_qdrant_query_points { "collection": "error_logs", "text": "connection timeout", "limit": 8 }
+fake_qdrant_persist_indexes {}
+```
+
+Otherwise use the local MiniLM sidecar (384-d, `normalize: true`):
 
 ```
 health {}
-fake_qdrant_list_collections {}
 fake_qdrant_create_collection { "name": "error_logs", "size": 384, "distance": "Cosine" }
 embeddings { "input": ["chunk 1", "chunk 2"], "normalize": true }
 fake_qdrant_upsert_points { "collection": "error_logs", "points": [{ "id": "1", "vector": [...], "payload": { "text": "chunk 1", "source": "build.log" } }] }
@@ -123,9 +134,9 @@ fake_qdrant_persist_indexes {}
 
 - Chunk to keep each input under ~20k characters. Batch up to 64 texts.
 - If `health` says the model is missing: `prefetch_model`. If that fails (offline / no cache), stop and say so; do not pretend to embed.
-- Collection `size` **must** match the embedding dimension. Do not mix models in one collection. Local MiniLM / RooCode-against-this-sidecar is **384** (`Xenova/all-MiniLM-L6-v2`, base URL `http://127.0.0.1:3100/v1`, dummy key `local`). Do not pick OpenAI 1536/3072 models for that path.
+- Do not mix models in one collection. Roo Codebase Indexing against fake-qdrant HTTP is **1024** (`bge-m3`) or **384** (`http://127.0.0.1:3100/v1`). Do not pick OpenAI 1536/3072 unless that API is actually in use.
 - After large upserts: `fake_qdrant_persist_indexes`. If scores look duplicated/stale: `fake_qdrant_compact_collection`.
-- Do **not** curl `:3100` or `:6333` while these MCP tools work. HTTP is a sidecar for other apps, not the assistant’s first path.
+- Do **not** curl `:3100` or `:6333` while these MCP tools work. HTTP is a sidecar for Roo `codebase_search` and other apps, not the assistant’s first path.
 - Do **not** `fake_qdrant_delete_collection` unless the user asked.
 
 ### F. Demo server (everything)
@@ -157,5 +168,5 @@ Do **not** use `echo`, image, gzip, long-running, elicitation, or sampling tools
 | doc-search empty | Ingest recipe. Do not hallucinate. |
 | embeddings model missing | `prefetch_model`; if offline, fail clearly. |
 | filesystem path denied | `list_allowed_directories`; ask to widen the root in `mcp.json`. |
-| fake-qdrant dimension error | Recreate the collection at the embedder's size (384 for local MiniLM / RooCode `http://127.0.0.1:3100/v1`). Do not mix with 1536/3072. |
+| fake-qdrant dimension error | Recreate the collection at the embedder's size (1024 for `bge-m3`, 384 for local MiniLM). Do not mix widths. |
 | leftover `*.db` | Ignore. JSON/JSONL only. Delete and re-ingest/re-upsert if the user wants a clean store. |

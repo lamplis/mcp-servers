@@ -1,17 +1,18 @@
 # docsearch-mcp (Local Fork)
 
-100% local document search MCP server using JSON files (no SQLite). No Docker, no external databases, no cloud services required. Fully offline after initial model download.
+100% local document search MCP server using JSON files (no SQLite). No Docker, no external databases. Embeddings are in-process: local MiniLM by default, or the shared `OPENAI_EMBED_*` intranet API (`bge-m3`, 1024-d).
 
 ## Features
 
-- **Offline-First**: Uses local transformer models for embeddings - no API keys required
 - **Hybrid Search**: Combines keyword token overlap with vector similarity
+- **Two embedder profiles**: local MiniLM (384-d, offline after `model-cache/`) or OpenAI-compatible HTTP (`OPENAI_EMBED_*`)
+- **Dim-safe index**: stored `embeddingDim` mismatch resets the JSON index (`index.dim_mismatch`)
 - **Multi-Source Indexing**: Local files, web pages (URLs), and Confluence (optional)
 - **Automatic Indexing**: Server auto-indexes on startup
-- **Simple Setup**: Just drop files in a folder and add URLs to a text file
+- **Simple Setup**: Drop files in a folder and add URLs to a text file; or `python scripts/setup_roo.py --embeddings external`
 - **100% Local Storage**: JSON index files (no database binaries)
 - **PDF Support**: Extract and search text from PDF documents
-- **Image Support**: Optional AI-powered image description and search
+- **Image Support**: Optional AI-powered image description and search (off on this workstation)
 
 ## Quick Start
 
@@ -157,24 +158,29 @@ Built `dist/` entry (optional):
 }
 ```
 
-### Using OpenAI (optional)
+### Using an OpenAI-compatible embedder
 
-If you prefer to use OpenAI embeddings instead of local models:
+Same `OPENAI_EMBED_*` block as fake-qdrant. `python scripts/setup_roo.py --embeddings external` writes this into `central-docsearch`. Launch with `node scripts/mcp-launch.mjs docsearch` (never `npx`).
 
 ```json
 {
   "mcpServers": {
-    "docsearch": {
-      "command": "npx",
-      "args": ["mcp-server-docsearch"],
+    "central-docsearch": {
+      "command": "node",
+      "args": ["scripts/mcp-launch.mjs", "docsearch"],
       "env": {
         "EMBEDDINGS_PROVIDER": "openai",
-        "OPENAI_API_KEY": "sk-your-key-here"
+        "OPENAI_EMBED_BASE_URL": "https://server.com/v1/openai",
+        "OPENAI_EMBED_MODEL": "bge-m3",
+        "OPENAI_EMBED_DIM": "1024",
+        "OPENAI_EMBED_API_KEY": ""
       }
     }
   }
 }
 ```
+
+`doc-ingest-status` reports `embedder: { provider, model, dim, ready, reason }`. A missing key keeps the server up as keyword-only (`NoOpEmbedder`). Changing dim resets `{DOCSEARCH_DATA_DIR}/index/` so the next `doc-ingest { "source": "all", "force": true }` re-embeds.
 
 ## Environment Variables
 
@@ -198,9 +204,11 @@ If you prefer to use OpenAI embeddings instead of local models:
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `OPENAI_API_KEY` | When using OpenAI | - | OpenAI API key |
-| `OPENAI_EMBED_MODEL` | No | `text-embedding-3-small` | Embedding model |
-| `OPENAI_EMBED_DIM` | No | `1536` | Embedding dimension |
+| `OPENAI_API_KEY` | Fallback | - | Used if `OPENAI_EMBED_API_KEY` is empty |
+| `OPENAI_EMBED_API_KEY` | When using OpenAI | - | Bearer token for `${OPENAI_EMBED_BASE_URL}/embeddings` |
+| `OPENAI_EMBED_BASE_URL` | No | `OPENAI_BASE_URL` or `https://api.openai.com/v1` | OpenAI-compatible base (no `/embeddings` suffix) |
+| `OPENAI_EMBED_MODEL` | No | `text-embedding-3-small` | Embedding model (`bge-m3` on the intranet API) |
+| `OPENAI_EMBED_DIM` | No | `1536` | Embedding dimension (`1024` for `bge-m3`) |
 
 ### Optional: Confluence Integration
 
@@ -282,15 +290,18 @@ docsearch start
 
 ## Switching Embedding Providers
 
-**Important**: Different embedding models produce different dimension vectors. If you switch providers, you must re-index your documents:
+**Important**: Different embedding models produce different dimension vectors. If the stored `meta.json` `embeddingDim` does not match the current config, the JSON index is reset (`index.dim_mismatch`) so the next ingest re-embeds. You can also delete the index directory:
 
-1. Delete the existing index directory: `Remove-Item -Recurse ./data/index`
-2. Set the new provider: `$env:EMBEDDINGS_PROVIDER = "openai"` (or `"local"`)
-3. Run the server to re-index
+1. Delete the existing index directory: `Remove-Item -Recurse ./data/docsearch/index`
+2. Set the new provider (`EMBEDDINGS_PROVIDER=openai` plus `OPENAI_EMBED_*`, or `"local"`)
+3. Run `doc-ingest { "source": "all", "force": true }`
+
+`doc-ingest-status` includes `embedder: { provider, model, dim, ready, reason }` so a missing API key shows as keyword-only instead of failing silently.
 
 | Provider | Model | Dimensions |
-|----------|-------|------------|
+|----------|--------|------------|
 | `local` (default) | Xenova/all-MiniLM-L6-v2 | 384 |
+| `openai` | bge-m3 (intranet) | 1024 |
 | `openai` | text-embedding-3-small | 1536 |
 
 ## Troubleshooting
