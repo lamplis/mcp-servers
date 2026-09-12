@@ -4,38 +4,40 @@
   "mcpServers": {
     "central-memory": {
       "$comment": "Auto-start: Knowledge graph memory server",
-      "command": "npx",
-      "args": ["tsx", "src/memory/index.ts"]
+      "command": "node",
+      "args": ["scripts/mcp-launch.mjs", "memory"],
+      "env": { "MCP_TAKEOVER": "1" }
     },
     "central-filesystem": {
       "$comment": "Auto-start: Filesystem server. Replace <YOUR_ALLOWED_DIR> with allowed paths",
-      "command": "npx",
-      "args": ["tsx", "src/filesystem/index.ts", "<YOUR_ALLOWED_DIR>"]
+      "command": "node",
+      "args": ["scripts/mcp-launch.mjs", "filesystem", "<YOUR_ALLOWED_DIR>"]
     },
     "central-everything": {
       "$comment": "Auto-start: MCP demo/test server with all capabilities",
-      "command": "npx",
-      "args": ["tsx", "src/everything/index.ts", "stdio"]
+      "command": "node",
+      "args": ["scripts/mcp-launch.mjs", "everything", "stdio"]
     },
     "central-sequentialthinking": {
       "$comment": "Auto-start: Sequential thinking/reasoning server",
-      "command": "npx",
-      "args": ["tsx", "src/sequentialthinking/index.ts"]
+      "command": "node",
+      "args": ["scripts/mcp-launch.mjs", "sequentialthinking"]
     },
     "central-fake-qdrant": {
       "$comment": "Auto-start: Fake Qdrant JSONL store with optional HTTP shim on port 6333",
-      "command": "npx",
-      "args": ["tsx", "src/fake-qdrant/index.ts"],
+      "command": "node",
+      "args": ["scripts/mcp-launch.mjs", "fake-qdrant"],
       "env": {
         "FAKE_QDRANT_ENABLED": "1",
         "FAKE_QDRANT_HTTP_PORT": "6333",
-        "FAKE_QDRANT_DATA_DIR": "./data/fake-qdrant"
+        "FAKE_QDRANT_DATA_DIR": "./data/fake-qdrant",
+        "MCP_TAKEOVER": "1"
       }
     },
     "central-local-embeddings": {
       "$comment": "Auto-start: Local embeddings (Transformers.js) with optional HTTP on port 3100",
-      "command": "npx",
-      "args": ["tsx", "src/local-embeddings/index.ts"],
+      "command": "node",
+      "args": ["scripts/mcp-launch.mjs", "local-embeddings"],
       "env": {
         "MODEL_ID": "Xenova/all-MiniLM-L6-v2",
         "MODEL_CACHE_DIR": "./model-cache",
@@ -46,13 +48,14 @@
     },
     "central-docsearch": {
       "$comment": "Auto-start: Document search with local embeddings (JSON index, no SQLite)",
-      "command": "npx",
-      "args": ["tsx", "src/docsearch/index.ts"],
+      "command": "node",
+      "args": ["scripts/mcp-launch.mjs", "docsearch"],
       "env": {
         "EMBEDDINGS_PROVIDER": "local",
         "DOCSEARCH_DATA_DIR": "./data/docsearch",
         "LOCAL_EMBED_MODEL": "Xenova/all-MiniLM-L6-v2",
-        "LOCAL_MODEL_CACHE_DIR": "./model-cache"
+        "LOCAL_MODEL_CACHE_DIR": "./model-cache",
+        "MCP_TAKEOVER": "1"
       }
     }
   }

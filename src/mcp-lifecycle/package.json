@@ -1,0 +1,32 @@
+{
+  "name": "@modelcontextprotocol/mcp-lifecycle",
+  "version": "0.1.0",
+  "description": "Shared MCP process identity, lock, takeover, logging, and shutdown hooks.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc && shx chmod +x dist/*.js",
+    "prepare": "npm run build",
+    "watch": "tsc --watch",
+    "test": "vitest run --coverage",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.1",
+    "@vitest/coverage-v8": "^3.2.7",
+    "shx": "^0.3.4",
+    "typescript": "^5.6.2",
+    "vitest": "^3.2.7"
+  }
+}

@@ -98,6 +98,10 @@ export function chunkDoc(text: string): readonly Chunk[] {
   while (i < text.length) {
     const end = Math.min(text.length, i + DOC_MAX_CHARS);
     const slice = text.slice(i, end);
+    if (!slice.trim()) {
+      i = end;
+      continue;
+    }
 
     chunks.push({
       content: slice,

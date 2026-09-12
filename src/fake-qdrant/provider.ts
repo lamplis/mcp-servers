@@ -103,7 +103,7 @@ export class ExternalEmbeddingProvider implements EmbeddingProvider {
 
 export function createProvider(config: FakeQdrantConfig): EmbeddingProvider | null {
   if (config.embeddingProvider === "local") {
-    const target = config.localEmbeddingsTarget ?? "http://127.0.0.1:3000";
+    const target = config.localEmbeddingsTarget ?? "http://127.0.0.1:3100";
     return new LocalEmbeddingProvider(target, "Xenova/all-MiniLM-L6-v2");
   }
 

@@ -1,20 +1,28 @@
-import { readFileSync, existsSync } from 'fs';
-import { mkdir, writeFile } from 'fs/promises';
+import { existsSync, readFileSync } from 'fs';
+import { mkdir } from 'fs/promises';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import chokidar from 'chokidar';
 import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 
-import { getDatabase } from '../ingest/database.js';
+import { closeDatabase, configureDatabase, getDatabase } from '../ingest/database.js';
 import { performSearch } from '../ingest/search.js';
 import { rerankResults } from '../ingest/reranker.js';
 import { registerIngestTools } from './tools/ingest-tools.js';
 import { FormatterFactory } from '../cli/adapters/output/formatter-factory.js';
 import { CONFIG } from '../shared/config.js';
-import { ingestFiles } from '../ingest/sources/files.js';
+import { ingestFiles, removeIndexedFile } from '../ingest/sources/files.js';
 import { ingestUrls, ensureUrlsFile } from '../ingest/sources/urls.js';
 import { Indexer } from '../ingest/indexer.js';
+import {
+  installDocsearchShutdown,
+  startDocsearchLifecycle,
+} from '../shared/lifecycle.js';
+import { setIndexingIdle, setIndexingRunning } from '../shared/indexing-state.js';
+import { removeInstanceFile, type Logger } from '@modelcontextprotocol/mcp-lifecycle';
 
 import type { OutputFormat } from '../cli/domain/ports.js';
 import type { SearchResult as AdapterSearchResult } from '../ingest/adapters/index.js';
@@ -39,10 +47,19 @@ interface SearchToolInput {
   readonly imagesOnly?: boolean | undefined;
 }
 
-// Read version from package.json
-const packageJson = JSON.parse(
-  readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
-);
+function readNearestPackageJson(metaUrl: string): { version: string } {
+  let dir = dirname(fileURLToPath(metaUrl));
+  for (let i = 0; i < 5; i += 1) {
+    const candidate = join(dir, 'package.json');
+    if (existsSync(candidate)) {
+      return JSON.parse(readFileSync(candidate, 'utf8')) as { version: string };
+    }
+    dir = dirname(dir);
+  }
+  return { version: '0.0.0' };
+}
+
+const packageJson = readNearestPackageJson(import.meta.url);
 
 export const server = new McpServer({ name: 'docsearch-mcp', version: packageJson.version });
 
@@ -223,51 +240,58 @@ server.registerTool(
   },
 );
 
-/**
- * Ensure data directories exist and create template files
- */
-async function ensureDataDirectories(): Promise<void> {
-  // Create data directory
-  await mkdir(CONFIG.DATA_DIR, { recursive: true });
-  
-  // Create docs directory
-  await mkdir(CONFIG.DOCS_DIR, { recursive: true });
-  
-  // Create urls.md template if it doesn't exist
-  await ensureUrlsFile();
-  
-  console.error(`Data directory: ${CONFIG.DATA_DIR}`);
-  console.error(`Docs directory: ${CONFIG.DOCS_DIR}`);
-  console.error(`URLs file: ${CONFIG.URLS_FILE}`);
-  console.error(`Index directory: ${CONFIG.DB_PATH}`);
+let mcpLogger: Logger | undefined;
+const watchers: Array<{ close(): Promise<void> | void }> = [];
+
+function logInfo(message: string, fields?: Record<string, unknown>): void {
+  if (mcpLogger) {
+    mcpLogger.info('docsearch', { message, ...fields });
+    return;
+  }
+  console.error(message);
+}
+
+function logError(message: string, fields?: Record<string, unknown>): void {
+  if (mcpLogger) {
+    mcpLogger.error('docsearch', { message, ...fields });
+    return;
+  }
+  console.error(message);
 }
 
 /**
  * Run initial indexing of files and URLs
  */
+async function ensureDataDirectories(logger?: Logger): Promise<void> {
+  await mkdir(CONFIG.DATA_DIR, { recursive: true });
+  await mkdir(CONFIG.DOCS_DIR, { recursive: true });
+  await ensureUrlsFile();
+  logger?.info('docsearch.paths', {
+    dataDir: CONFIG.DATA_DIR,
+    docsDir: CONFIG.DOCS_DIR,
+    urlsFile: CONFIG.URLS_FILE,
+    indexDir: CONFIG.DB_PATH,
+  });
+}
+
 async function runInitialIndexing(): Promise<void> {
-  console.error('Running initial indexing...');
-  
+  logInfo('Running initial indexing...');
+  setIndexingRunning();
   try {
     const adapter = await getDatabase();
-    
-    // Index files from docs directory
-    console.error('Indexing files from docs directory...');
+    logInfo('Indexing files from docs directory...');
     await ingestFiles(adapter);
-    
-    // Index URLs from urls.md
-    console.error('Indexing URLs from urls.md...');
+    logInfo('Indexing URLs from urls.md...');
     await ingestUrls(adapter);
-    
-    // Generate embeddings for new chunks
-    console.error('Generating embeddings...');
+    logInfo('Generating embeddings...');
     const indexer = new Indexer(adapter);
     await indexer.embedNewChunks();
-    
-    console.error('Initial indexing complete');
+    logInfo('Initial indexing complete');
+    setIndexingIdle();
   } catch (error) {
-    console.error('Error during initial indexing:', error);
-    // Don't fail startup if indexing fails
+    const message = error instanceof Error ? error.message : String(error);
+    logError('Error during initial indexing', { error: message });
+    setIndexingIdle(message);
   }
 }
 
@@ -296,40 +320,47 @@ function startFileWatching(): void {
   // Debounced URL indexing (wait 2 seconds after last change)
   const indexUrls = debounce(async () => {
     if (isIndexing) {
-      console.error('[watch] Skipping URL indexing - already in progress');
+      logInfo('[watch] Skipping URL indexing - already in progress');
       return;
     }
     isIndexing = true;
-    console.error('[watch] urls.md changed - re-indexing URLs...');
+    setIndexingRunning();
+    logInfo('[watch] urls.md changed - re-indexing URLs...');
     try {
       const adapter = await getDatabase();
       await ingestUrls(adapter);
       const indexer = new Indexer(adapter);
       await indexer.embedNewChunks();
-      console.error('[watch] URL indexing complete');
+      logInfo('[watch] URL indexing complete');
+      setIndexingIdle();
     } catch (error) {
-      console.error('[watch] URL indexing failed:', error);
+      const message = error instanceof Error ? error.message : String(error);
+      logError('[watch] URL indexing failed', { error: message });
+      setIndexingIdle(message);
     } finally {
       isIndexing = false;
     }
   }, 2000);
 
-  // Debounced file indexing (wait 2 seconds after last change)
   const indexFiles = debounce(async () => {
     if (isIndexing) {
-      console.error('[watch] Skipping file indexing - already in progress');
+      logInfo('[watch] Skipping file indexing - already in progress');
       return;
     }
     isIndexing = true;
-    console.error('[watch] docs/ changed - re-indexing files...');
+    setIndexingRunning();
+    logInfo('[watch] docs/ changed - re-indexing files...');
     try {
       const adapter = await getDatabase();
       await ingestFiles(adapter);
       const indexer = new Indexer(adapter);
       await indexer.embedNewChunks();
-      console.error('[watch] File indexing complete');
+      logInfo('[watch] File indexing complete');
+      setIndexingIdle();
     } catch (error) {
-      console.error('[watch] File indexing failed:', error);
+      const message = error instanceof Error ? error.message : String(error);
+      logError('[watch] File indexing failed', { error: message });
+      setIndexingIdle(message);
     } finally {
       isIndexing = false;
     }
@@ -349,7 +380,7 @@ function startFileWatching(): void {
   });
 
   urlsWatcher.on('error', (error) => {
-    console.error('[watch] urls.md watcher error:', error);
+    logError('[watch] urls.md watcher error', { error: String(error) });
   });
 
   // Watch docs directory for changes
@@ -362,34 +393,58 @@ function startFileWatching(): void {
     },
   });
 
-  docsWatcher.on('all', (event, path) => {
-    if (event === 'add' || event === 'change' || event === 'unlink') {
-      console.error(`[watch] ${event}: ${path}`);
+  docsWatcher.on('all', (event, filePath) => {
+    if (event === 'unlink') {
+      logInfo(`[watch] ${event}: ${filePath}`);
+      void (async () => {
+        try {
+          const adapter = await getDatabase();
+          await removeIndexedFile(adapter, filePath);
+        } catch (error) {
+          logError('[watch] unlink remove failed', { error: String(error), path: filePath });
+        }
+      })();
+      return;
+    }
+    if (event === 'add' || event === 'change') {
+      logInfo(`[watch] ${event}: ${filePath}`);
       indexFiles();
     }
   });
 
   docsWatcher.on('error', (error) => {
-    console.error('[watch] docs/ watcher error:', error);
+    logError('[watch] docs/ watcher error', { error: String(error) });
   });
 
-  console.error(`[watch] Watching ${CONFIG.URLS_FILE} for URL changes`);
-  console.error(`[watch] Watching ${CONFIG.DOCS_DIR} for file changes`);
+  watchers.push(urlsWatcher, docsWatcher);
+  logInfo(`[watch] Watching ${CONFIG.URLS_FILE} for URL changes`);
+  logInfo(`[watch] Watching ${CONFIG.DOCS_DIR} for file changes`);
 }
 
 export async function startServer() {
-  // Ensure data directories exist
-  await ensureDataDirectories();
-  
-  // Run initial indexing
-  await runInitialIndexing();
-  
-  // Start file watching for auto-indexing
-  startFileWatching();
-  
-  // Connect MCP transport
+  const lifecycle = await startDocsearchLifecycle();
+  mcpLogger = lifecycle.logger;
+  configureDatabase({ diskGate: lifecycle.diskGate });
+
+  await ensureDataDirectories(lifecycle.logger);
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  console.error(`Docsearch MCP Server running on stdio; logs: ${lifecycle.logger.currentFilePath()}`);
+
+  void runInitialIndexing();
+  startFileWatching();
+
+  installDocsearchShutdown(lifecycle, transport, async () => {
+    for (const watcher of watchers) {
+      await Promise.resolve(watcher.close()).catch(() => undefined);
+    }
+    await closeDatabase();
+    await lifecycle.processLock.release();
+    await removeInstanceFile(lifecycle.dataDir);
+    await lifecycle.logger.flush();
+    lifecycle.logger.close();
+  });
 }
 
 // Auto-start if run directly

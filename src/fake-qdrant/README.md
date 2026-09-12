@@ -300,23 +300,36 @@ Each line is one JSON object (`event`, `level`, `fields`). HTTP requests from Ro
 
 **Symptom:** Collection or point requests return 503 `service busy`, or logs show `store.busy`.
 
-Another MCP or HTTP process already holds `{dataDir}/.write.lock`. Concurrent clients in **one** process are serialized and safe. Two processes must not share the same data directory: stop the other indexer, or point this instance at a different `FAKE_QDRANT_DATA_DIR`. If the holder crashed, a stale pid in that lockdir is stolen on the next start.
+A verified takeover should replace the lock holder on the next start (`MCP_TAKEOVER=1`). Inspect and kill a leftover instance without stopping every `node.exe`:
 
-This is not multi-tenant access control. There is still no auth between clients.
+```powershell
+node scripts/mcp-ps.mjs doctor
+node scripts/mcp-ps.mjs list
+node scripts/mcp-ps.mjs kill fake-qdrant
+```
+
+Also check `data/fake-qdrant/logs/launcher.log` if the server never starts (red in Roo).
 
 ### Port 6333 Already in Use
 
-**Symptom:** Server fails to start with `EADDRINUSE` error.
+**Symptom:** Bind fails with `EADDRINUSE`.
 
-**Solutions:**
+The new process probes `/healthz`. If the holder is our sidecar, it is killed and the port is rebound. If not:
 
-1. **Find and stop the conflicting process:**
-   ```powershell
-   # PowerShell (Windows)
-   Get-NetTCPConnection -LocalPort 6333 -State Listen | 
-     Select-Object -ExpandProperty OwningProcess | 
-     ForEach-Object { Stop-Process -Id $_ -Force }
-   ```
+```powershell
+node scripts/mcp-ps.mjs doctor
+node scripts/mcp-ps.mjs kill fake-qdrant
+```
+
+`/healthz` now includes `pid`, `instanceId`, and `dataDir`.
+
+### Empty / flagged payloads (Roo indexer)
+
+`fake_qdrant_collection_stats` reports `emptyPayloadPoints` (whitespace-only `codeChunk`) and `flaggedPayloadPoints` (default patterns `Error converting`, `Traceback`). Those come from the Roo codebase indexer / an external docx converter, not from this server. Set `FAKE_QDRANT_DROP_EMPTY_CHUNKS=1` to skip empty chunks at upsert. Collection names like `ws-<hash>` are workspace hashes from Roo; leftover collections from other folders stay on disk until deleted.
+
+Filter-delete dedup (`http.delete_dedup`, `deleted: 0`) is a 60s TTL to ignore duplicate Roo deletes; it is logged at debug.
+
+Large ~1.4 MB PUT batches are the client's batch size; this server accepts up to 25 MiB. Split batches in Roo if requests are slow (`http.slow_request`).
 
 2. **Use a different port:**
    ```json
@@ -350,7 +363,7 @@ This is not multi-tenant access control. There is still no auth between clients.
 2. **Check Node.js availability:**
    ```powershell
    node --version  # Should be v20+
-   npx tsx --version
+   node scripts/mcp-ps.mjs doctor
    ```
 
 3. **Verify workspace path:**
@@ -375,7 +388,7 @@ This is not multi-tenant access control. There is still no auth between clients.
 2. **Check server logs:**
    ```powershell
    # Run manually to see output
-   npx tsx src/fake-qdrant/index.ts
+   node scripts/mcp-launch.mjs fake-qdrant
    ```
 
 3. **Verify MCP SDK version:**

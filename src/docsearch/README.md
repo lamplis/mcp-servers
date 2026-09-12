@@ -102,19 +102,20 @@ Changes are debounced (waits 2 seconds after last change before reindexing).
 
 ### VS Code / Cursor / RooCode
 
-Preferred on locked-down Windows (no compiled `dist/` required):
+Preferred on locked-down Windows (local `tsx` or compiled `dist/`, never `npx`):
 
 ```json
 {
   "mcpServers": {
     "central-docsearch": {
-      "command": "npx",
-      "args": ["tsx", "src/docsearch/index.ts"],
+      "command": "node",
+      "args": ["scripts/mcp-launch.mjs", "docsearch"],
       "cwd": "C:\\DEVHOME\\GITHUB\\mcp-servers",
       "env": {
         "EMBEDDINGS_PROVIDER": "local",
         "DOCSEARCH_DATA_DIR": "C:\\DEVHOME\\GITHUB\\mcp-servers\\data\\docsearch",
-        "LOCAL_MODEL_CACHE_DIR": "C:\\DEVHOME\\GITHUB\\mcp-servers\\model-cache"
+        "LOCAL_MODEL_CACHE_DIR": "C:\\DEVHOME\\GITHUB\\mcp-servers\\model-cache",
+        "MCP_TAKEOVER": "1"
       }
     }
   }

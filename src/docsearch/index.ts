@@ -11,7 +11,6 @@ export { performSearch } from "./ingest/search.js";
 
 async function main() {
   await startServer();
-  console.error("Docsearch MCP Server running on stdio");
 }
 
 main().catch((error) => {

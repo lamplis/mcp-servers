@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-The Fake Qdrant MCP Server is a repository-local vector store for similarity search without Docker, WSL, SQLite, or an external Qdrant process. It runs through npm-managed Node.js (`npx tsx`), persists each collection as `meta.json` + `points.jsonl`, and searches with brute-force cosine similarity in memory. Callers supply vectors on upsert (typically from local-embeddings or docsearch). An optional loopback HTTP shim exposes a subset of Qdrant-style collection and point APIs.
+The Fake Qdrant MCP Server is a repository-local vector store for similarity search without Docker, WSL, SQLite, or an external Qdrant process. It runs through npm-managed Node.js (`node scripts/mcp-launch.mjs fake-qdrant`), persists each collection as `meta.json` + `points.jsonl`, and searches with brute-force cosine similarity in memory. Callers supply vectors on upsert (typically from local-embeddings or docsearch). An optional loopback HTTP shim exposes a subset of Qdrant-style collection and point APIs.
 
 ## Product Overview
 
@@ -16,7 +16,7 @@ Give local development a Qdrant-like collection and query surface that works on 
 
 ### Value Proposition
 - JSONL persistence; leftover `*.db` files are ignored, not migrated
-- npm-only execution (`npx tsx src/fake-qdrant/index.ts`)
+- npm-only execution (`node scripts/mcp-launch.mjs fake-qdrant`)
 - MCP tools for collections, upsert, query, compact, and persist
 - Optional HTTP shim on `127.0.0.1` (default port 6333)
 - Storage is provider-agnostic: vectors arrive already computed
@@ -50,7 +50,7 @@ Give local development a Qdrant-like collection and query surface that works on 
 7. **Maintenance** - `fake_qdrant_compact_collection` and `fake_qdrant_persist_indexes`.
 8. **Optional embedding helper** - `provider.ts` can call a local or OpenAI-compatible HTTP embeddings API. MCP upsert still takes raw vectors; the helper is not the storage engine.
 9. **Daily file logs** - JSONL logs under `{dataDir}/logs/YYYY-MM-DD.log`, kept for 3 local days, so RooCode/VS Code HTTP and MCP failures can be reproduced from disk.
-10. **Single-writer robustness** - One in-process disk gate for all durable writes; per-collection mutation mutex; `{dataDir}/.write.lock` so a second process cannot rewrite the same JSONL. HTTP returns 503 when the lock is busy. Auto-compact after upsert storms. Not multi-tenant auth.
+10. **Single-writer robustness** - One in-process disk gate for all durable writes; per-collection mutation mutex; `{dataDir}/.write.lock` so a second process cannot rewrite the same JSONL. A new start with `MCP_TAKEOVER=1` verifies the holder (`instance.json` + `tasklist` + `/healthz` pid) and kills it; `MCP_TAKEOVER=0` exits immediately. HTTP `/healthz` returns `pid`/`instanceId`. Stdin close, transport close, SIGINT/SIGTERM, and uncaughtException all run one shutdown path that releases the lock and port. Launch via `node scripts/mcp-launch.mjs fake-qdrant`, never `npx tsx`.
 11. **RooCode HTTP dialect** - Nested payload filters, payload index stubs, honest point counts, query `{ points }`, scroll/retrieve/count, keyword postings, JSONL tombstones, truncated `codeChunk` logs.
 
 ### Architecture Summary
@@ -145,7 +145,7 @@ Give local development a Qdrant-like collection and query surface that works on 
 
 ### Use Case 3: Locked-down Windows
 **As a** team member without admin/Docker/SQLite  
-**I want to** run the store via `npx tsx`  
+**I want to** run the store via `node scripts/mcp-launch.mjs fake-qdrant`  
 **So that** setup stays inside this repo
 
 **Scenario**: Roo/Cursor launches `central-fake-qdrant` from `mcp.json` with `FAKE_QDRANT_DATA_DIR` under `data/fake-qdrant`.
@@ -154,7 +154,7 @@ Give local development a Qdrant-like collection and query surface that works on 
 
 ### Implementation Details
 - **Language**: TypeScript
-- **Runtime**: Node.js via `npx tsx` (no extra binaries)
+- **Runtime**: Node.js via `scripts/mcp-launch.mjs` (local `tsx` or `dist/`, never `npx`)
 - **Storage**: JSONL + in-memory maps
 - **Search**: Brute-force cosine
 - **Protocol**: MCP stdio; optional HTTP shim
@@ -178,7 +178,10 @@ Give local development a Qdrant-like collection and query surface that works on 
 - `FAKE_QDRANT_ENABLED` - `1` enables the HTTP shim
 - `FAKE_QDRANT_HTTP_HOST` - bind host (default `127.0.0.1`)
 - `FAKE_QDRANT_HTTP_PORT` - bind port (default `6333`)
-- `FAKE_QDRANT_DATA_DIR` - JSONL collection root (default `./data/fake-qdrant`)
+- `FAKE_QDRANT_DATA_DIR` - JSONL collection root (default package-relative `data/fake-qdrant`)
+- `MCP_TAKEOVER` - `1` (default) verified kill of our lock/port holder; `0` fail-fast
+- `FAKE_QDRANT_DROP_EMPTY_CHUNKS` - `1` skips whitespace-only `codeChunk` points at upsert
+- `FAKE_QDRANT_SLOW_MS` - warn `http.slow_request` above this duration (default `1000`)
 - `FAKE_QDRANT_LOG_DIR` - daily JSONL debug logs (default `{resolvedDataDir}/logs`)
 - `FAKE_QDRANT_LOG_LEVEL` - `debug` | `info` | `warn` | `error` (default `info`)
 - `FAKE_QDRANT_LOG_RETENTION_DAYS` - keep this many local calendar days of log files (default `3`)
@@ -193,7 +196,7 @@ Startup reads these through `loadConfig()` and passes `dataDir` / HTTP bind into
 - No built-in ingest/chunking
 - No auth or multi-tenant isolation
 - Leftover `*.db` files cannot be converted; re-upsert instead
-- Concurrent clients on one process share files safely; a second process on the same data dir fails (`store.busy` / HTTP 503). This is not multi-tenant isolation or authentication.
+- Concurrent clients on one process share files safely. A second process on the same data dir is taken over when `MCP_TAKEOVER=1` and it is verified as ours; otherwise it exits. This is not multi-tenant isolation or authentication.
 
 ### Security Considerations
 - Default HTTP bind is loopback
@@ -218,7 +221,7 @@ npm run build --workspace src/fake-qdrant
 
 ### Local launch
 ```powershell
-npx tsx src/fake-qdrant/index.ts
+node scripts/mcp-launch.mjs fake-qdrant
 ```
 - MCP on stdio
 - HTTP shim when `FAKE_QDRANT_ENABLED=1`

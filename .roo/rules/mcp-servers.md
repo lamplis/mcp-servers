@@ -151,7 +151,7 @@ Do **not** use `echo`, image, gzip, long-running, elicitation, or sampling tools
 
 | Symptom | Action |
 |---------|--------|
-| MCP tool missing / timeout | Say which server failed. Suggest reload + `python scripts/setup_roo.py --check` and `node scripts/validate_mcps.mjs`. Continue with IDE tools only for the **current workspace**. |
+| MCP tool missing / timeout | First `node scripts/mcp-ps.mjs doctor`. Then reload + `python scripts/setup_roo.py --check` and `node scripts/validate_mcps.mjs`. Read `data/<role>/logs/launcher.log` if a server is red. Continue with IDE tools only for the **current workspace**. |
 | doc-search empty | Ingest recipe. Do not hallucinate. |
 | embeddings model missing | `prefetch_model`; if offline, fail clearly. |
 | filesystem path denied | `list_allowed_directories`; ask to widen the root in `mcp.json`. |

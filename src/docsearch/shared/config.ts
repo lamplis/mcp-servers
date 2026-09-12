@@ -1,4 +1,5 @@
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 
 type EmbeddingsProvider = 'local' | 'openai' | 'tei';
@@ -65,11 +66,22 @@ function validateConfluenceAuthMethod(method: string): ConfluenceAuthMethod {
 
 let _config: AppConfig | null = null;
 
+function defaultDocsearchDataDir(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const pkgRoot = pathBasename(here) === 'shared' ? dirname(here) : here;
+  const root = pathBasename(pkgRoot) === 'dist' ? dirname(pkgRoot) : pkgRoot;
+  return join(root, '..', '..', 'data', 'docsearch');
+}
+
+function pathBasename(p: string): string {
+  return p.replace(/\\/g, '/').split('/').filter(Boolean).pop() ?? '';
+}
+
 function initializeConfig(): AppConfig {
   if (_config === null) {
     dotenv.config();
 
-    const dataDir = process.env.DOCSEARCH_DATA_DIR || './data';
+    const dataDir = process.env.DOCSEARCH_DATA_DIR || defaultDocsearchDataDir();
     const docsDir = join(dataDir, 'docs');
     const urlsFile = join(dataDir, 'urls.md');
     const dbPath = process.env.DB_PATH || join(dataDir, 'index');

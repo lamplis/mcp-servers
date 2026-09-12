@@ -117,6 +117,7 @@ describe('Fake Qdrant HTTP API Integration Tests', () => {
       const healthz = await httpRequest('GET', '/healthz');
       expect(healthz.status).toBe(200);
       expect(healthz.data).toMatchObject({ status: 'ok' });
+      expect(Number.isInteger((healthz.data as { pid?: number }).pid)).toBe(true);
     });
 
     it('should accept HEAD and trailing slash on /healthz', async () => {

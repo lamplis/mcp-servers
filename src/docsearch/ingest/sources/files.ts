@@ -202,6 +202,11 @@ export async function ingestFiles(adapter: DatabaseAdapter) {
   }
 }
 
+export async function removeIndexedFile(adapter: DatabaseAdapter, absPath: string): Promise<boolean> {
+  const uri = `file://${absPath}`;
+  return adapter.deleteDocumentByUri(uri);
+}
+
 function guessRepo(absPath: string): string | null {
   let dir = path.dirname(absPath);
   while (dir !== path.dirname(dir)) {

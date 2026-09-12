@@ -168,6 +168,15 @@ line6`;
       expect(chunk!.tokenCount).toBe(Math.round(3 * 1.05 + 5)); // 3 words
     });
 
+    it('should skip whitespace-only slices in long documents', () => {
+      const text = `visible${' '.repeat(1400)}tail`;
+      const result = chunkDoc(text);
+      expect(result.length).toBeGreaterThan(0);
+      for (const chunk of result) {
+        expect(chunk.content.trim().length).toBeGreaterThan(0);
+      }
+    });
+
     it('should handle empty token counting', () => {
       const result = chunkDoc('   ');
       expect(result).toEqual([]);

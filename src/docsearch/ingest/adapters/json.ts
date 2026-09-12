@@ -1,6 +1,7 @@
 import { mkdir, writeFile, readFile, rename, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
+import { DiskGate } from '@modelcontextprotocol/mcp-lifecycle';
 import type {
   DatabaseAdapter,
   ChunkToEmbed,
@@ -18,6 +19,7 @@ import type { DocumentInput, ChunkInput } from '../../shared/types.js';
 export interface JsonAdapterConfig {
   readonly path: string;
   readonly embeddingDim: number;
+  readonly diskGate?: DiskGate;
 }
 
 interface StoredDocument {
@@ -66,9 +68,11 @@ export class JsonAdapter implements DatabaseAdapter {
   private dirty = false;
   private persistChain: Promise<void> = Promise.resolve();
   private readonly dir: string;
+  private readonly diskGate: DiskGate;
 
   constructor(private readonly config: JsonAdapterConfig) {
     this.dir = config.path;
+    this.diskGate = config.diskGate ?? new DiskGate();
   }
 
   async init(): Promise<void> {
@@ -137,21 +141,23 @@ export class JsonAdapter implements DatabaseAdapter {
 
   private async persist(): Promise<void> {
     this.persistChain = this.persistChain.catch(() => undefined).then(async () => {
-      await mkdir(this.dir, { recursive: true });
-      const meta: PersistedMeta = {
-        nextDocumentId: this.nextDocumentId,
-        nextChunkId: this.nextChunkId,
-        embeddingDim: this.config.embeddingDim,
-        kv: Object.fromEntries(this.kv),
-      };
-      await writeJsonAtomic(this.metaFile(), meta);
-      await writeJsonAtomic(this.documentsFile(), [...this.documents.values()]);
-      await writeJsonAtomic(this.chunksFile(), [...this.chunks.values()]);
-      await writeJsonAtomic(
-        this.embeddingsFile(),
-        Object.fromEntries([...this.embeddings.entries()].map(([id, vec]) => [String(id), vec])),
-      );
-      this.dirty = false;
+      await this.diskGate.run(async () => {
+        await mkdir(this.dir, { recursive: true });
+        const meta: PersistedMeta = {
+          nextDocumentId: this.nextDocumentId,
+          nextChunkId: this.nextChunkId,
+          embeddingDim: this.config.embeddingDim,
+          kv: Object.fromEntries(this.kv),
+        };
+        await writeJsonAtomic(this.metaFile(), meta);
+        await writeJsonAtomic(this.documentsFile(), [...this.documents.values()]);
+        await writeJsonAtomic(this.chunksFile(), [...this.chunks.values()]);
+        await writeJsonAtomic(
+          this.embeddingsFile(),
+          Object.fromEntries([...this.embeddings.entries()].map(([id, vec]) => [String(id), vec])),
+        );
+        this.dirty = false;
+      });
     });
     await this.persistChain;
   }
@@ -426,6 +432,22 @@ export class JsonAdapter implements DatabaseAdapter {
     return this.kv.get(key);
   }
 
+  async deleteDocumentByUri(uri: string): Promise<boolean> {
+    const existing = await this.getDocument(uri);
+    if (!existing) {
+      return false;
+    }
+    await this.cleanupDocumentChunks(existing.id);
+    const doc = this.documents.get(existing.id);
+    if (doc) {
+      this.documentsByUri.delete(doc.uri);
+    }
+    this.documents.delete(existing.id);
+    this.markDirty();
+    await this.persist();
+    return true;
+  }
+
   async cleanupDocumentChunks(documentId: number): Promise<void> {
     for (const chunk of [...this.chunks.values()]) {
       if (chunk.document_id === documentId) {
@@ -559,10 +581,8 @@ function normalizeUri(uri: string): string {
 
 function extraJsonOf(doc: DocumentInput): string | null {
   const rec = doc as DocumentInput & { extraJson?: string | null };
-  if (rec.extraJson !== undefined) {
-    return rec.extraJson;
-  }
-  return doc.extra_json ?? null;
+  const extra = rec.extraJson ?? doc.extra_json;
+  return typeof extra === 'string' ? extra : null;
 }
 
 function tokenize(text: string): Set<string> {

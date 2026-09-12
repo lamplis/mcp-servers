@@ -50,6 +50,10 @@ Example:
 }
 ```
 
+## Lifecycle
+
+Launch with `node scripts/mcp-launch.mjs memory` (never `npx`). The process writes `{dataDir}/instance.json`, takes `{memoryFile}.lock` with verified takeover (`MCP_TAKEOVER`), and shuts down on stdin close, SIGINT/SIGTERM, and uncaughtException. Inspect with `node scripts/mcp-ps.mjs list|kill memory`.
+
 ## API
 
 ### Tools

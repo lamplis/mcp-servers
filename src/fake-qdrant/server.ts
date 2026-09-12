@@ -5,6 +5,17 @@ import { Store, type PointRecord } from "./store.js";
 import { matchFilter } from "./qdrant-filter.js";
 import type { EmbeddingProvider } from "./provider.js";
 import type { Logger } from "./logger.js";
+import type { InstanceInfo } from "@modelcontextprotocol/mcp-lifecycle";
+import type { ProcessLock } from "./disk-gate.js";
+
+export type FakeQdrantRuntimeStatus = {
+  identity?: InstanceInfo | null;
+  httpBound?: boolean;
+  httpHost?: string | null;
+  httpPort?: number | null;
+  logFile?: string;
+  lockDir?: string;
+};
 
 export type FakeQdrantServerFactoryOptions = {
   store?: Store;
@@ -12,6 +23,10 @@ export type FakeQdrantServerFactoryOptions = {
   embeddingProvider?: EmbeddingProvider | null;
   logger?: Logger;
   diskGate?: DiskGate;
+  existingLock?: ProcessLock | null;
+  acquireLock?: boolean;
+  dropEmptyChunks?: boolean;
+  runtimeStatus?: FakeQdrantRuntimeStatus;
 };
 
 export type FakeQdrantServerFactoryResponse = {
@@ -30,6 +45,9 @@ export async function createServer(
       dataDir: options.dataDir,
       logger: options.logger,
       diskGate: options.diskGate,
+      existingLock: options.existingLock,
+      acquireLock: options.acquireLock,
+      dropEmptyChunks: options.dropEmptyChunks,
     }));
 
   const embeddingProvider = options.embeddingProvider ?? null;
@@ -40,7 +58,7 @@ export async function createServer(
     version: "0.1.0",
   });
 
-  registerTools(server, store, embeddingProvider, logger);
+  registerTools(server, store, embeddingProvider, logger, options.runtimeStatus);
 
   return {
     server,
@@ -83,13 +101,56 @@ function registerTools(
   server: McpServer,
   store: Store,
   _embeddingProvider: EmbeddingProvider | null,
-  logger?: Logger
+  logger?: Logger,
+  runtimeStatus?: FakeQdrantRuntimeStatus
 ) {
   const PointSchema = z.object({
     id: z.union([z.string(), z.number()]),
     vector: z.array(z.number()),
     payload: z.any().optional(),
   });
+
+  server.registerTool(
+    "fake_qdrant_status",
+    {
+      title: "Fake Qdrant process status",
+      description:
+        "Identity, lock holder, HTTP bind state, and log file path for this process.",
+      inputSchema: {},
+      outputSchema: {
+        pid: z.number(),
+        role: z.string().optional(),
+        instanceId: z.string().optional(),
+        httpBound: z.boolean().optional(),
+        httpHost: z.string().nullable().optional(),
+        httpPort: z.number().nullable().optional(),
+        logFile: z.string().optional(),
+        lockDir: z.string().optional(),
+        busy: z.boolean(),
+        dataDir: z.string(),
+      },
+    },
+    async () =>
+      runLoggedTool(logger, "fake_qdrant_status", async () => {
+        const identity = runtimeStatus?.identity;
+        const payload = {
+          pid: identity?.pid ?? process.pid,
+          role: identity?.role,
+          instanceId: identity?.instanceId,
+          httpBound: runtimeStatus?.httpBound ?? false,
+          httpHost: runtimeStatus?.httpHost ?? null,
+          httpPort: runtimeStatus?.httpPort ?? null,
+          logFile: runtimeStatus?.logFile,
+          lockDir: runtimeStatus?.lockDir,
+          busy: store.isBusy,
+          dataDir: store.directory,
+        };
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }],
+          structuredContent: payload,
+        };
+      })
+  );
 
   server.registerTool(
     "fake_qdrant_list_collections",
@@ -470,6 +531,10 @@ function registerTools(
             jsonlLines: z.number(),
             indexes: z.array(z.string()),
             postingListSizes: z.record(z.number()),
+            emptyPayloadPoints: z.number(),
+            flaggedPayloadPoints: z.number(),
+            createdAt: z.string().optional(),
+            updatedAt: z.string().optional(),
           })
         ),
       },

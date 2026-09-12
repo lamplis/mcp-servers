@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare this repo so RooCode / Cursor can launch every MCP with npx + Python only.
+"""Prepare this repo so RooCode / Cursor can launch every MCP with node + local tsx/dist.
 
 Usage:
   python scripts/setup_roo.py
@@ -36,45 +36,56 @@ def filesystem_root() -> str:
     return str(REPO_ROOT.parent)
 
 
+def launch_args(role: str, extra: list[str] | None = None) -> list[str]:
+    args = ["scripts/mcp-launch.mjs", role]
+    if extra:
+        args.extend(extra)
+    return args
+
+
 def build_mcp_config(*, include_cwd: bool, filesystem_dir: str) -> dict:
     cwd = repo_path_for_json()
     servers = {
         "central-memory": {
             "$comment": "Knowledge graph memory server (JSONL, no database)",
-            "command": "npx",
-            "args": ["tsx", "src/memory/index.ts"],
+            "command": "node",
+            "args": launch_args("memory"),
             "disabled": False,
             "alwaysAllow": [],
+            "env": {
+                "MCP_TAKEOVER": "1",
+            },
         },
         "central-filesystem": {
             "$comment": "Filesystem server",
-            "command": "npx",
-            "args": ["tsx", "src/filesystem/index.ts", filesystem_dir],
+            "command": "node",
+            "args": launch_args("filesystem", [filesystem_dir]),
             "disabled": False,
             "alwaysAllow": [],
         },
         "central-everything": {
             "$comment": "MCP demo/test server",
-            "command": "npx",
-            "args": ["tsx", "src/everything/index.ts", "stdio"],
+            "command": "node",
+            "args": launch_args("everything", ["stdio"]),
             "disabled": False,
             "alwaysAllow": ["get-env"],
         },
         "central-sequentialthinking": {
             "$comment": "Sequential thinking/reasoning server",
-            "command": "npx",
-            "args": ["tsx", "src/sequentialthinking/index.ts"],
+            "command": "node",
+            "args": launch_args("sequentialthinking"),
             "disabled": False,
             "alwaysAllow": [],
         },
         "central-fake-qdrant": {
             "$comment": "Local Qdrant-compatible vector store (JSONL, HTTP :6333)",
-            "command": "npx",
-            "args": ["tsx", "src/fake-qdrant/index.ts"],
+            "command": "node",
+            "args": launch_args("fake-qdrant"),
             "env": {
                 "FAKE_QDRANT_ENABLED": "1",
                 "FAKE_QDRANT_HTTP_PORT": "6333",
                 "FAKE_QDRANT_DATA_DIR": str(DATA_FAKE_QDRANT),
+                "MCP_TAKEOVER": "1",
             },
             "disabled": False,
             "alwaysAllow": [
@@ -86,12 +97,13 @@ def build_mcp_config(*, include_cwd: bool, filesystem_dir: str) -> dict:
                 "fake_qdrant_query_points",
                 "fake_qdrant_compact_collection",
                 "fake_qdrant_persist_indexes",
+                "fake_qdrant_status",
             ],
         },
         "central-local-embeddings": {
             "$comment": "Local Transformers.js embeddings (optional HTTP :3100)",
-            "command": "npx",
-            "args": ["tsx", "src/local-embeddings/index.ts"],
+            "command": "node",
+            "args": launch_args("local-embeddings"),
             "env": {
                 "MODEL_ID": DEFAULT_MODEL,
                 "MODEL_CACHE_DIR": str(MODEL_CACHE),
@@ -104,13 +116,14 @@ def build_mcp_config(*, include_cwd: bool, filesystem_dir: str) -> dict:
         },
         "central-docsearch": {
             "$comment": "Document search with in-process local embeddings (JSON index)",
-            "command": "npx",
-            "args": ["tsx", "src/docsearch/index.ts"],
+            "command": "node",
+            "args": launch_args("docsearch"),
             "env": {
                 "EMBEDDINGS_PROVIDER": "local",
                 "DOCSEARCH_DATA_DIR": str(DATA_DOCSEARCH),
                 "LOCAL_EMBED_MODEL": DEFAULT_MODEL,
                 "LOCAL_MODEL_CACHE_DIR": str(MODEL_CACHE),
+                "MCP_TAKEOVER": "1",
             },
             "disabled": False,
             "alwaysAllow": ["doc-search", "doc-ingest", "doc-ingest-status"],
@@ -204,6 +217,25 @@ def check_environment() -> int:
     else:
         print("No leftover .db / vec0.dll files found.")
 
+    tsx = REPO_ROOT / "node_modules" / "tsx" / "dist" / "cli.mjs"
+    lifecycle_dist = REPO_ROOT / "src" / "mcp-lifecycle" / "dist" / "index.js"
+    print(f"tsx local: {tsx if tsx.exists() else 'MISSING (npm install tsx from internal registry)'}")
+    print(f"mcp-lifecycle dist: {lifecycle_dist if lifecycle_dist.exists() else 'MISSING (npm run build -w src/mcp-lifecycle)'}")
+    if not tsx.exists() and not (REPO_ROOT / "src" / "fake-qdrant" / "dist" / "index.js").exists():
+        ok = False
+
+    doctor = subprocess.run(
+        ["node", str(REPO_ROOT / "scripts" / "mcp-ps.mjs"), "doctor"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    print(doctor.stdout or doctor.stderr or "mcp-ps doctor produced no output")
+    if doctor.returncode != 0:
+        print("mcp-ps doctor reported issues (stale locks/instance files).")
+
     if not ok:
         print("Check failed.")
         return 1
@@ -242,7 +274,7 @@ def main() -> int:
     print("Setup complete.")
     print("  1. From the repo root, run: python scripts/setup_roo.py --check")
     print("  2. Run: node scripts/validate_mcps.mjs")
-    print("  3. Reload VS Code / RooCode / Cursor so npx tsx MCP servers start.")
+    print("  3. Reload VS Code / RooCode / Cursor so node scripts/mcp-launch.mjs MCP servers start.")
     print("  4. No Docker, SQLite, or extra binaries are required.")
     print(f"  Data: {DATA_FAKE_QDRANT}")
     print(f"        {DATA_DOCSEARCH}")

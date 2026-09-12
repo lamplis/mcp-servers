@@ -49,8 +49,9 @@ describe('Configuration', () => {
       expect(CONFIG.LOCAL_EMBED_MODEL).toBe('Xenova/all-MiniLM-L6-v2');
       expect(CONFIG.LOCAL_EMBED_DIM).toBe(384);
       expect(CONFIG.LOCAL_MODEL_CACHE_DIR).toBe('./model-cache');
-      expect(CONFIG.FILE_ROOTS).toEqual([join('./data', 'docs')]);
-      expect(CONFIG.DB_PATH).toBe(join('./data', 'index'));
+      expect(CONFIG.FILE_ROOTS).toHaveLength(1);
+      expect(CONFIG.FILE_ROOTS[0]!.replace(/\\/g, '/')).toMatch(/data\/docsearch\/docs$/);
+      expect(CONFIG.DB_PATH.replace(/\\/g, '/')).toMatch(/data\/docsearch\/index$/);
     });
 
     it('should use environment variables when set', async () => {
@@ -231,7 +232,8 @@ describe('Configuration', () => {
 
       const { CONFIG } = await import('../src/shared/config.js');
 
-      expect(CONFIG.FILE_ROOTS).toEqual([join('./data', 'docs')]); // Uses default when empty
+      expect(CONFIG.FILE_ROOTS).toHaveLength(1);
+      expect(CONFIG.FILE_ROOTS[0]!.replace(/\\/g, '/')).toMatch(/data\/docsearch\/docs$/);
       expect(CONFIG.CONFLUENCE_SPACES).toEqual([]);
     });
 

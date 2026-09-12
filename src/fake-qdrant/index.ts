@@ -2,7 +2,17 @@
 
 import path from "node:path";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { loadConfig } from "./config.js";
+import {
+  announceInstance,
+  installShutdownHooks,
+  lockDirForDataDir,
+  parseTakeoverPolicy,
+  removeInstanceFile,
+  resolveContention,
+  resolvePortContention,
+  type InstanceInfo,
+} from "@modelcontextprotocol/mcp-lifecycle";
+import { loadConfig, FAKE_QDRANT_SIDECAR } from "./config.js";
 import { createServer } from "./server.js";
 import { startQdrantHttpServer, type QdrantHttpServerHandle } from "./qdrant-http.js";
 import { createFileLogger } from "./logger.js";
@@ -21,8 +31,27 @@ async function main() {
     diskGate,
   });
 
+  process.title = "mcp-fake-qdrant";
+  const lockDir = lockDirForDataDir(dataDir);
+  const policy = parseTakeoverPolicy();
+  const processLock = await resolveContention({
+    lockDir,
+    dataDir,
+    role: "fake-qdrant",
+    policy,
+    logger,
+  });
+  const identity: InstanceInfo = await announceInstance({
+    role: "fake-qdrant",
+    dataDir,
+    port: config.httpEnabled ? config.httpPort : null,
+  });
+
   logger.info("lifecycle.start", {
     pid: process.pid,
+    instanceId: identity.instanceId,
+    role: identity.role,
+    tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
     cwd: process.cwd(),
     node: process.version,
     dataDir,
@@ -31,45 +60,78 @@ async function main() {
     httpEnabled: config.httpEnabled,
     httpHost: config.httpHost,
     httpPort: config.httpPort,
+    takeover: policy,
   });
   console.error(
     `Fake Qdrant MCP server running on stdio; logs: ${logger.currentFilePath()}`
   );
 
+  const runtimeStatus = {
+    identity,
+    httpBound: false,
+    httpHost: config.httpHost,
+    httpPort: config.httpEnabled ? config.httpPort : null,
+    logFile: logger.currentFilePath(),
+    lockDir,
+  };
+
   const { server, store } = await createServer({
     dataDir: config.dataDir,
     logger,
     diskGate,
+    existingLock: processLock,
+    acquireLock: false,
+    dropEmptyChunks: config.dropEmptyChunks,
+    runtimeStatus,
   });
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
   let httpHandle: QdrantHttpServerHandle | null = null;
 
+  const bindHttp = () =>
+    startQdrantHttpServer({
+      store,
+      host: config.httpHost,
+      port: config.httpPort,
+      logger,
+      identity: {
+        pid: identity.pid,
+        instanceId: identity.instanceId,
+        startedAt: identity.startedAt,
+        dataDir,
+      },
+      slowRequestMs: config.slowRequestMs,
+      flagPayloadPatterns: config.flagPayloadPatterns,
+    });
+
   if (config.httpEnabled) {
     try {
-      httpHandle = await startQdrantHttpServer({
-        store,
-        host: config.httpHost,
-        port: config.httpPort,
-        logger,
-      });
+      httpHandle = await bindHttp();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes("EADDRINUSE")) {
         logger.error("http.bind_failed", {
           code: "EADDRINUSE",
           port: config.httpPort,
-          message:
-            `HTTP shim skipped: port ${config.httpPort} already in use. MCP tools remain available over stdio. A stale process is still serving :${config.httpPort}; browser /healthz will hit that old process. Stop all node.exe, then reload the IDE.`,
+          message: `Port ${config.httpPort} in use; attempting verified takeover (${policy}).`,
         });
-      } else {
-        logger.error("http.bind_failed", {
+        await resolvePortContention({
+          host: config.httpHost,
           port: config.httpPort,
-          message: `HTTP shim failed to start: ${msg}. MCP tools remain available over stdio.`,
+          role: "fake-qdrant",
+          dataDir,
+          sidecar: FAKE_QDRANT_SIDECAR,
+          policy,
+          logger,
         });
+        httpHandle = await bindHttp();
+      } else {
+        throw err;
       }
     }
+    runtimeStatus.httpBound = Boolean(httpHandle);
+    runtimeStatus.httpPort = httpHandle?.port ?? config.httpPort;
   } else {
     logger.info("http.disabled", {
       message: "Set FAKE_QDRANT_ENABLED=1 to expose the Qdrant-compatible HTTP shim.",
@@ -79,31 +141,19 @@ async function main() {
     );
   }
 
-  const shutdown = async () => {
-    logger.info("lifecycle.shutdown", {});
-    if (httpHandle) {
-      await httpHandle.close().catch(() => {});
-    }
-    await store.close();
-    await server.close();
-    await logger.flush();
-    logger.close();
-    process.exit(0);
-  };
-
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
-  process.on("uncaughtException", (error) => {
-    logger.error("process.uncaughtException", {
-      error: error instanceof Error ? error.message : String(error),
-      stack: error instanceof Error ? error.stack : undefined,
-    });
-  });
-  process.on("unhandledRejection", (reason) => {
-    logger.error("process.unhandledRejection", {
-      error: reason instanceof Error ? reason.message : String(reason),
-      stack: reason instanceof Error ? reason.stack : undefined,
-    });
+  installShutdownHooks({
+    logger,
+    transport,
+    onShutdown: async () => {
+      if (httpHandle) {
+        await httpHandle.close().catch(() => {});
+      }
+      await store.close();
+      await server.close();
+      await removeInstanceFile(dataDir);
+      await logger.flush();
+      logger.close();
+    },
   });
 }
 

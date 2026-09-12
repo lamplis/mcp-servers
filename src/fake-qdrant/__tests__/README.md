@@ -184,9 +184,10 @@ Future test additions to consider:
 The tests use dynamic port allocation (port 0). If you see port conflicts:
 
 1. Ensure no other test process is running
-2. Check for zombie Node.js processes:
+2. Check for leftover MCP processes:
    ```powershell
-   Get-Process node | Stop-Process -Force
+   node scripts/mcp-ps.mjs doctor
+   node scripts/mcp-ps.mjs kill fake-qdrant
    ```
 
 ### Tests timeout

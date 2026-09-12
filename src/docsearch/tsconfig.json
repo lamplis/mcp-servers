@@ -14,7 +14,8 @@
     "noPropertyAccessFromIndexSignature": false
   },
   "include": [
-    "./**/*.ts"
+    "./**/*.ts",
+    "./**/*.d.ts"
   ],
   "exclude": [
     "**/__tests__/**",

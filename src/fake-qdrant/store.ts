@@ -1,7 +1,11 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import type { Logger } from "./logger.js";
+import { defaultFakeQdrantDataDir } from "./config.js";
+import {
+  countPayloadHygiene,
+  isWhitespaceOnlyPayload,
+} from "./payload-hygiene.js";
 import {
   DiskGate,
   Mutex,
@@ -25,6 +29,8 @@ export interface CollectionMeta {
   distance: DistanceMetric;
   indexes?: string[];
   pointsCount?: number;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface CollectionInfo {
@@ -41,6 +47,10 @@ export interface CollectionStats {
   jsonlLines: number;
   indexes: string[];
   postingListSizes: Record<string, number>;
+  emptyPayloadPoints: number;
+  flaggedPayloadPoints: number;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface PointRecord {
@@ -73,8 +83,11 @@ export interface StoreOptions {
   logger?: Logger;
   diskGate?: DiskGate;
   acquireLock?: boolean;
+  existingLock?: ProcessLock | null;
   lockRetries?: number;
   lockRetryMs?: number;
+  dropEmptyChunks?: boolean;
+  flagPayloadPatterns?: string[];
 }
 
 export class CollectionSizeMismatchError extends Error {
@@ -95,14 +108,9 @@ export const AUTO_COMPACT_MULTIPLIER = 2;
 export const AUTO_COMPACT_EXTRA_LINES = 500;
 export const QUERY_YIELD_EVERY = 256;
 
-const DEFAULT_DATA_DIR = path.join(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "data"
-);
-
 export function resolveDataDir(override?: string): string {
   const envDir = process.env.FAKE_QDRANT_DATA_DIR;
-  const dir = override ?? envDir ?? DEFAULT_DATA_DIR;
+  const dir = override ?? envDir ?? defaultFakeQdrantDataDir();
   return path.resolve(dir);
 }
 
@@ -126,13 +134,17 @@ export class Store {
   private processLock: ProcessLock | null = null;
   private busy = false;
   private busyError: ProcessLockBusyError | null = null;
+  private readonly dropEmptyChunks: boolean;
+  private readonly flagPayloadPatterns: string[];
 
   static async create(options: StoreOptions = {}): Promise<Store> {
     const baseDir = resolveDataDir(options.dataDir);
     await fs.mkdir(baseDir, { recursive: true });
     const diskGate = options.diskGate ?? new DiskGate();
-    const store = new Store(baseDir, options.logger, diskGate);
-    if (options.acquireLock !== false) {
+    const store = new Store(baseDir, options.logger, diskGate, options);
+    if (options.existingLock) {
+      store.processLock = options.existingLock;
+    } else if (options.acquireLock !== false) {
       try {
         store.processLock = await acquireProcessLock({
           lockDir: lockDirForDataDir(baseDir),
@@ -160,9 +172,18 @@ export class Store {
   private constructor(
     private readonly baseDir: string,
     private readonly logger: Logger | undefined,
-    diskGate: DiskGate
+    diskGate: DiskGate,
+    options: StoreOptions = {}
   ) {
     this.diskGate = diskGate;
+    this.dropEmptyChunks = options.dropEmptyChunks ?? process.env.FAKE_QDRANT_DROP_EMPTY_CHUNKS === "1";
+    this.flagPayloadPatterns =
+      options.flagPayloadPatterns ??
+      (process.env.FAKE_QDRANT_FLAG_PAYLOAD_PATTERNS
+        ? process.env.FAKE_QDRANT_FLAG_PAYLOAD_PATTERNS.split(",")
+            .map((item) => item.trim())
+            .filter(Boolean)
+        : ["Error converting", "Traceback"]);
   }
 
   get directory(): string {
@@ -306,6 +327,8 @@ export class Store {
         distance?: unknown;
         indexes?: unknown;
         pointsCount?: unknown;
+        createdAt?: unknown;
+        updatedAt?: unknown;
       };
       const size = Number(parsed.size);
       if (!Number.isInteger(size) || size <= 0) {
@@ -320,6 +343,8 @@ export class Store {
         distance,
         indexes: this.parseIndexes(parsed.indexes),
         pointsCount: Number.isInteger(pointsCount) && pointsCount >= 0 ? pointsCount : 0,
+        createdAt: typeof parsed.createdAt === "string" ? parsed.createdAt : undefined,
+        updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : undefined,
       };
     } catch {
       return null;
@@ -521,6 +546,9 @@ export class Store {
           jsonlLines: loaded.jsonlLines,
           indexes: [...(loaded.meta.indexes ?? [])],
           postingListSizes: this.postingListSizes(loaded),
+          createdAt: loaded.meta.createdAt,
+          updatedAt: loaded.meta.updatedAt,
+          ...countPayloadHygiene(loaded.points.values(), this.flagPayloadPatterns),
         } satisfies CollectionStats;
       });
       if (item) {
@@ -544,9 +572,10 @@ export class Store {
     return this.mutexFor(name).run(async () => {
       await this.deleteCollectionUnlocked(name);
 
+      const now = new Date().toISOString();
       const loaded: LoadedCollection = {
         name,
-        meta: { size, distance, indexes: [], pointsCount: 0 },
+        meta: { size, distance, indexes: [], pointsCount: 0, createdAt: now, updatedAt: now },
         points: new Map(),
         postings: new Map(),
         dirty: false,
@@ -580,9 +609,10 @@ export class Store {
         }
         return { created: false, info: this.toInfo(existing) };
       }
+      const now = new Date().toISOString();
       const loaded: LoadedCollection = {
         name,
-        meta: { size, distance, indexes: [], pointsCount: 0 },
+        meta: { size, distance, indexes: [], pointsCount: 0, createdAt: now, updatedAt: now },
         points: new Map(),
         postings: new Map(),
         dirty: false,
@@ -733,7 +763,15 @@ export class Store {
         }
       }
 
+      const toWrite: PointRecord[] = [];
       for (const point of points) {
+        if (this.dropEmptyChunks && isWhitespaceOnlyPayload(point.payload)) {
+          this.logger?.info("store.drop_empty_chunk", {
+            collection: name,
+            id: point.id,
+          });
+          continue;
+        }
         const key = String(point.id);
         const previous = loaded.points.get(key);
         if (previous) {
@@ -746,10 +784,15 @@ export class Store {
         };
         loaded.points.set(key, record);
         this.indexPoint(loaded, record);
+        toWrite.push(record);
+      }
+      if (toWrite.length === 0) {
+        return;
       }
       loaded.dirty = true;
-      await this.appendPoints(name, points);
-      loaded.jsonlLines += points.length;
+      loaded.meta.updatedAt = new Date().toISOString();
+      await this.appendPoints(name, toWrite);
+      loaded.jsonlLines += toWrite.length;
       loaded.meta.pointsCount = loaded.points.size;
       await this.persistMetaCounts(loaded);
       if (this.shouldAutoCompact(loaded)) {

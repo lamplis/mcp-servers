@@ -5,12 +5,23 @@ import { CollectionSizeMismatchError, Store } from "./store.js";
 import { toLogger, type Logger } from "./logger.js";
 import { ProcessLockBusyError } from "./disk-gate.js";
 import { matchFilter } from "./qdrant-filter.js";
+import {
+  countPayloadHygiene,
+  isWhitespaceOnlyPayload,
+} from "./payload-hygiene.js";
+import { FAKE_QDRANT_SIDECAR } from "./config.js";
+import type { InstanceInfo } from "@modelcontextprotocol/mcp-lifecycle";
 
 export interface QdrantHttpServerOptions {
   store: Store;
   host?: string;
   port?: number;
   logger?: Logger | ((message: string) => void);
+  identity?: Pick<InstanceInfo, "pid" | "instanceId" | "startedAt"> & {
+    dataDir?: string;
+  };
+  slowRequestMs?: number;
+  flagPayloadPatterns?: string[];
 }
 
 interface HttpRequestLog {
@@ -23,6 +34,9 @@ interface HttpRequestLog {
   status?: number;
   resBody?: unknown;
   health?: boolean;
+  pointsCount?: number;
+  emptyChunks?: number;
+  flaggedChunks?: number;
 }
 
 export interface QdrantHttpServerHandle {
@@ -34,6 +48,7 @@ export interface QdrantHttpServerHandle {
 
 const DELETE_DEDUP_TTL_MS = 60_000;
 export const CODE_CHUNK_LOG_CHARS = 200;
+const COLLECTION_RECREATE_WINDOW_MS = 60_000;
 
 export async function startQdrantHttpServer(
   options: QdrantHttpServerOptions
@@ -46,6 +61,16 @@ export async function startQdrantHttpServer(
   const port = options.port ?? Number(process.env.FAKE_QDRANT_HTTP_PORT ?? 6333);
   const logger = toLogger(options.logger);
   const deleteDedup = new Map<string, number>();
+  const recentlyDeleted = new Map<string, { at: number; pointsCount: number }>();
+  const slowRequestMs = options.slowRequestMs ?? Number(process.env.FAKE_QDRANT_SLOW_MS ?? 1000);
+  const flagPayloadPatterns =
+    options.flagPayloadPatterns ?? ["Error converting", "Traceback"];
+  const identity = options.identity ?? {
+    pid: process.pid,
+    instanceId: "",
+    startedAt: new Date().toISOString(),
+    dataDir: undefined as string | undefined,
+  };
 
   const server = http.createServer(async (req, res) => {
     const started = Date.now();
@@ -59,7 +84,16 @@ export async function startQdrantHttpServer(
       health: isRead(req.method) && isHealthPath(path),
     };
     try {
-      await handleRequest(req, res, options.store, requestLog, logger, deleteDedup);
+      await handleRequest(
+        req,
+        res,
+        options.store,
+        requestLog,
+        logger,
+        deleteDedup,
+        recentlyDeleted,
+        identity
+      );
     } catch (error) {
       if (error instanceof ProcessLockBusyError) {
         logger.error("store.busy", {
@@ -92,7 +126,27 @@ export async function startQdrantHttpServer(
       }
     }
     requestLog.reqBody = summarizeHttpBody(requestLog.reqBody);
-    emitHttpLog(logger, requestLog, Date.now() - started);
+    const ms = Date.now() - started;
+    if (
+      requestLog.method === "PUT" &&
+      requestLog.path.includes("/points") &&
+      requestLog.reqBody &&
+      typeof requestLog.reqBody === "object"
+    ) {
+      const body = requestLog.reqBody as { points?: unknown[] };
+      const points = Array.isArray(body?.points) ? body.points : [];
+      requestLog.pointsCount = points.length;
+      requestLog.emptyChunks = points.filter((point) =>
+        isWhitespaceOnlyPayload((point as { payload?: unknown })?.payload)
+      ).length;
+      requestLog.flaggedChunks = countPayloadHygiene(
+        points.map((point) => ({
+          payload: (point as { payload?: unknown })?.payload,
+        })),
+        flagPayloadPatterns
+      ).flaggedPayloadPoints;
+    }
+    emitHttpLog(logger, requestLog, ms, slowRequestMs);
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -181,7 +235,12 @@ function headerValue(
   return value;
 }
 
-function emitHttpLog(logger: Logger, log: HttpRequestLog, ms: number): void {
+function emitHttpLog(
+  logger: Logger,
+  log: HttpRequestLog,
+  ms: number,
+  slowRequestMs: number
+): void {
   const status = log.status ?? 0;
   const fields: Record<string, unknown> = {
     method: log.method,
@@ -192,6 +251,12 @@ function emitHttpLog(logger: Logger, log: HttpRequestLog, ms: number): void {
     userAgent: log.userAgent,
     contentLength: log.contentLength,
   };
+  if (log.pointsCount != null) {
+    fields.pointsCount = log.pointsCount;
+    fields.bytes = log.contentLength ? Number(log.contentLength) : undefined;
+    fields.emptyChunks = log.emptyChunks;
+    fields.flaggedChunks = log.flaggedChunks;
+  }
   if (!log.health) {
     fields.reqBody = log.reqBody;
     fields.resBody = log.resBody;
@@ -202,6 +267,16 @@ function emitHttpLog(logger: Logger, log: HttpRequestLog, ms: number): void {
     logger.warn("http.request", fields);
   } else {
     logger.info("http.request", fields);
+  }
+  if (ms >= slowRequestMs && !log.health) {
+    logger.warn("http.slow_request", {
+      method: log.method,
+      path: log.path,
+      ms,
+      status,
+      pointsCount: log.pointsCount,
+      bytes: log.contentLength ? Number(log.contentLength) : undefined,
+    });
   }
 }
 
@@ -245,8 +320,15 @@ async function handleRequest(
   store: Store,
   requestLog: HttpRequestLog,
   logger: Logger,
-  deleteDedup: Map<string, number>
-) {
+  deleteDedup: Map<string, number>,
+  recentlyDeleted: Map<string, { at: number; pointsCount: number }>,
+    identity: {
+      pid: number;
+      instanceId: string;
+      startedAt: string;
+      dataDir?: string;
+    }
+  ) {
   const json = (status: number, payload: unknown) =>
     sendJson(res, status, payload, requestLog);
 
@@ -264,9 +346,13 @@ async function handleRequest(
   if (isRead(req.method) && isHealthPath(path)) {
     return json(200, {
       status: "ok",
-      sidecar: "fake-qdrant-mcp",
+      sidecar: FAKE_QDRANT_SIDECAR,
       title: "qdrant - vector search engine",
       version: "1.12.0",
+      pid: identity.pid,
+      instanceId: identity.instanceId,
+      dataDir: identity.dataDir,
+      startedAt: identity.startedAt,
     });
   }
 
@@ -350,6 +436,15 @@ async function handleRequest(
     }
 
     try {
+      const deletedAgo = recentlyDeleted.get(collectionName);
+      if (deletedAgo && Date.now() - deletedAgo.at < COLLECTION_RECREATE_WINDOW_MS) {
+        logger.warn("collection.recreate", {
+          collection: collectionName,
+          previousPointsCount: deletedAgo.pointsCount,
+          ageMs: Date.now() - deletedAgo.at,
+        });
+        recentlyDeleted.delete(collectionName);
+      }
       await store.ensureCollection(collectionName, { size, distance });
       return json(200, { result: true, status: "ok", time: 0 });
     } catch (error) {
@@ -366,7 +461,14 @@ async function handleRequest(
   }
 
   if (req.method === "DELETE" && remainder === "") {
+    const existing = await store.getCollection(collectionName);
+    const pointsCount = existing?.pointsCount ?? 0;
     await store.deleteCollection(collectionName);
+    recentlyDeleted.set(collectionName, { at: Date.now(), pointsCount });
+    logger.warn("collection.delete", {
+      collection: collectionName,
+      pointsCount,
+    });
     return json(200, { result: true, status: "ok", time: 0 });
   }
 
@@ -552,7 +654,7 @@ async function handleRequest(
         const key = filterDedupKey(collectionName, filter);
         const seen = deleteDedup.get(key);
         if (seen !== undefined && now - seen < DELETE_DEDUP_TTL_MS) {
-          logger.info("http.delete_dedup", {
+          logger.debug("http.delete_dedup", {
             collection: collectionName,
             ageMs: now - seen,
           });
@@ -615,7 +717,7 @@ async function handleRequest(
     method: req.method ?? "",
     path,
     rawUrl: req.url ?? "",
-    sidecar: "fake-qdrant-mcp",
+    sidecar: FAKE_QDRANT_SIDECAR,
   });
 }
 

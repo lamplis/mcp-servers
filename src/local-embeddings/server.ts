@@ -1,4 +1,6 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
@@ -14,9 +16,19 @@ import {
   verifyAssets,
 } from "./embedder.js";
 
-const packageJson = JSON.parse(
-  readFileSync(new URL("./package.json", import.meta.url), "utf8")
-) as { version: string };
+function readNearestPackageJson(metaUrl: string): { version: string } {
+  let dir = dirname(fileURLToPath(metaUrl));
+  for (let i = 0; i < 5; i += 1) {
+    const candidate = join(dir, "package.json");
+    if (existsSync(candidate)) {
+      return JSON.parse(readFileSync(candidate, "utf8")) as { version: string };
+    }
+    dir = dirname(dir);
+  }
+  return { version: "0.0.0" };
+}
+
+const packageJson = readNearestPackageJson(import.meta.url);
 
 const MAX_CHARS = parsePositiveInt(process.env.MAX_CHARS, 20000);
 const MAX_BATCH = parsePositiveInt(process.env.MAX_BATCH, 64);

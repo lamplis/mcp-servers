@@ -19,7 +19,11 @@
     "link-all": "npm link --workspaces",
     "validate:mcp": "node scripts/validate_mcps.mjs"
   },
+  "devDependencies": {
+    "tsx": "4.20.6"
+  },
   "dependencies": {
+    "@modelcontextprotocol/mcp-lifecycle": "*",
     "@modelcontextprotocol/server-docsearch": "*",
     "@modelcontextprotocol/server-everything": "*",
     "@modelcontextprotocol/server-filesystem": "*",

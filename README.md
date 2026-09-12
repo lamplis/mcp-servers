@@ -1,6 +1,6 @@
 # Model Context Protocol servers
 
-This **fork** adapts the MCP reference-server collection for a locked-down Windows workstation (Node 20, npm, Python; no Docker, WSL, or SQLite). The runtime here is the local JSON MCP set launched with `npx` and `python`.
+This **fork** adapts the MCP reference-server collection for a locked-down Windows workstation (Node 20, npm, Python; no Docker, WSL, or SQLite). The runtime here is the local JSON MCP set launched with `node scripts/mcp-launch.mjs` (never `npx`).
 
 > [!IMPORTANT]
 > For a catalog of community MCP servers, use [the MCP Registry](https://registry.modelcontextprotocol.io/). This fork does not maintain that list. The servers under `src/` in this repo are the ones this workstation can run.
@@ -38,7 +38,7 @@ These servers aim to demonstrate MCP features and the official SDKs.
 
 Use these MCP servers with [RooCode](https://roocode.com) or Cursor. Full guide: [ROOCODE-SETUP.md](ROOCODE-SETUP.md).
 
-This fork is JSON-only (no SQLite / Docker). Launchers: `npx` and `python`.
+This fork is JSON-only (no SQLite / Docker). Launchers: `node scripts/mcp-launch.mjs <role>` (never `npx`).
 
 ### 1. Clone and Install
 
@@ -96,7 +96,7 @@ The rule file (`mcp-servers.md`) teaches the AI to:
 
 **Prerequisites:**
 - Node.js 20+
-- npm / npx
+- npm (from the internal registry; this repo's `.npmrc` still points at `registry.npmjs.org` and must be overridden locally — `npx` will hang on the public registry)
 - Python 3 (for `scripts/setup_roo.py` only)
 - RooCode or Cursor extension installed
 - No API keys required (local embeddings work offline after model cache is populated)

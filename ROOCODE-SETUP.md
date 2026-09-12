@@ -75,7 +75,7 @@ node scripts/validate_mcps.mjs
 
 Or: `npm run validate:mcp`
 
-That script starts each server with `npx tsx`, waits until it logs ready on stderr, then:
+That script starts each server with `node scripts/mcp-launch.mjs` (never `npx`), waits until it logs ready on stderr, then:
 
 1. `initialize`
 2. `tools/list`
@@ -195,7 +195,7 @@ Use doc-ingest with source "all" and force true
 
 1. `node --version` should be 20+.
 2. Paths in `mcp.json` use double backslashes on Windows.
-3. `cwd` must be this repo (so `npx tsx src/...` resolves).
+3. `cwd` must be this repo (so `scripts/mcp-launch.mjs` and `src/...` resolve).
 4. Check the RooCode / Cursor MCP output panel.
 5. Re-run `node scripts/validate_mcps.mjs`.
 
@@ -215,17 +215,28 @@ Expect `"status":"ok"` on `/`, `/health`, and `/healthz`. `GET /v1` and `GET /v1
 
 ### Port already in use (`EADDRINUSE` on 6333 or 3100)
 
-Stdio still works. Fake Qdrant **does not steal the port**: if `:6333` or `:3100` is already bound, the new MCP process logs EADDRINUSE and skips the HTTP sidecar. The browser then still talks to the **old** process, which is why `/healthz` can keep returning 404 after a git pull.
-
-From an external PowerShell (IDE closed):
+A new fake-qdrant start verifies `/healthz` and takes over if the holder is ours (`MCP_TAKEOVER=1`). Never run `Get-Process node | Stop-Process -Force` — that kills every MCP and the IDE extension host.
 
 ```powershell
-Get-NetTCPConnection -LocalPort 3100,6333 -ErrorAction SilentlyContinue |
-  Select-Object LocalPort, OwningProcess, State
-Get-Process node -ErrorAction SilentlyContinue | Stop-Process -Force
+node scripts/mcp-ps.mjs doctor
+node scripts/mcp-ps.mjs list
+node scripts/mcp-ps.mjs kill fake-qdrant
 ```
 
-Then reopen the IDE so MCP binds the ports again. A current sidecar health JSON includes `"sidecar":"local-embeddings-mcp"` or `"sidecar":"fake-qdrant-mcp"`. If that field is missing, you are still on the stale process.
+If the server is **red** and never logged `lifecycle.start`, open `data/fake-qdrant/logs/launcher.log` first.
+
+VS Code / Roo tasks (add locally; `.vscode/` is gitignored):
+
+```json
+{
+  "version": "2.0.0",
+  "tasks": [
+    { "label": "MCP: list processes", "type": "shell", "command": "node scripts/mcp-ps.mjs list" },
+    { "label": "MCP: kill fake-qdrant", "type": "shell", "command": "node scripts/mcp-ps.mjs kill fake-qdrant" },
+    { "label": "MCP: kill docsearch", "type": "shell", "command": "node scripts/mcp-ps.mjs kill docsearch" }
+  ]
+}
+```
 
 ### Docsearch not finding results
 

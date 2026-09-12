@@ -316,6 +316,16 @@ src/fake-qdrant/data/
 # Daily MCP debug logs (also covered by *.log)
 src/memory/logs/
 data/fake-qdrant/logs/
+data/docsearch/logs/
+data/memory/logs/
+data/filesystem/logs/
+data/everything/logs/
+data/sequentialthinking/logs/
+data/local-embeddings/logs/
+
+# Runtime instance identity
+data/**/instance.json
+**/instance.json
 
 # Cross-process write locks
 **/.write.lock/

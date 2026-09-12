@@ -6,6 +6,7 @@ import { ingestConfluence } from '../../ingest/sources/confluence.js';
 import { ingestFiles } from '../../ingest/sources/files.js';
 import { ingestUrls } from '../../ingest/sources/urls.js';
 
+import { getIndexingState, setIndexingIdle, setIndexingRunning } from '../../shared/indexing-state.js';
 import type { DatabaseAdapter } from '../../ingest/adapters/index.js';
 import type { SourceType } from '../../shared/types.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -35,6 +36,7 @@ export function registerIngestTools(server: McpServer): void {
       const adapter = await getDatabase();
       const indexer = new Indexer(adapter);
       const force = input.force ?? false;
+      setIndexingRunning();
 
       try {
         const results: string[] = [];
@@ -61,9 +63,11 @@ export function registerIngestTools(server: McpServer): void {
         }
 
         const content = results.join('\n');
+        setIndexingIdle();
         return { content: [{ type: 'text' as const, text: content }] };
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
+        setIndexingIdle(errorMessage);
         return {
           content: [
             {
@@ -91,9 +95,10 @@ export function registerIngestTools(server: McpServer): void {
       try {
         const adapter = await getDatabase();
         const stats = await getIndexStats(adapter, input.detailed || false);
+        const indexing = getIndexingState();
 
         return {
-          content: [{ type: 'text' as const, text: formatStatsOutput(stats, input.detailed) }],
+          content: [{ type: 'text' as const, text: formatStatsOutput({ ...stats, ...indexing }, input.detailed) }],
         };
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
@@ -142,7 +147,12 @@ function formatStatsOutput(stats: Record<string, unknown>, detailed?: boolean): 
     `📝 Chunks: ${stats.chunks}`,
     `🧠 Embedded chunks: ${stats.embedded_chunks}`,
     `📈 Embedding progress: ${stats.embedding_progress}%`,
+    `⚙️ Indexing: ${stats.indexing ?? 'idle'}`,
+    `🕒 Last run: ${stats.lastRun ?? 'never'}`,
   ];
+  if (stats.lastError) {
+    lines.push(`⚠️ Last error: ${stats.lastError}`);
+  }
 
   if (detailed && Array.isArray(stats.sourceBreakdown)) {
     lines.push('');

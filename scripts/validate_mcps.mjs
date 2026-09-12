@@ -4,24 +4,28 @@
  * Usage: node scripts/validate_mcps.mjs
  */
 import { spawn } from "node:child_process";
+import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const NPX = process.platform === "win32" ? "npx.cmd" : "npx";
+const NODE = process.execPath;
+const LIFECYCLE_DIST = path.join(ROOT, "src", "mcp-lifecycle", "dist", "index.js");
 
 const SERVERS = [
   {
     name: "central-memory",
-    args: ["tsx", "src/memory/index.ts"],
-    env: {},
+    command: NODE,
+    args: ["scripts/mcp-launch.mjs", "memory"],
+    env: { MCP_TAKEOVER: "1" },
     expectTools: ["read_graph", "create_entities"],
     callTool: { name: "read_graph", arguments: {} },
   },
   {
     name: "central-filesystem",
-    args: ["tsx", "src/filesystem/index.ts", ROOT],
+    command: NODE,
+    args: ["scripts/mcp-launch.mjs", "filesystem", ROOT],
     env: {},
     expectTools: ["list_directory", "read_file"],
     callTool: { name: "list_allowed_directories", arguments: {} },
@@ -29,32 +33,38 @@ const SERVERS = [
   },
   {
     name: "central-sequentialthinking",
-    args: ["tsx", "src/sequentialthinking/index.ts"],
+    command: NODE,
+    args: ["scripts/mcp-launch.mjs", "sequentialthinking"],
     env: {},
     expectTools: ["sequentialthinking"],
   },
   {
     name: "central-everything",
-    args: ["tsx", "src/everything/index.ts", "stdio"],
+    command: NODE,
+    args: ["scripts/mcp-launch.mjs", "everything", "stdio"],
     env: {},
     expectTools: ["echo"],
     callTool: { name: "echo", arguments: { message: "mcp-validate" } },
   },
   {
     name: "central-fake-qdrant",
-    args: ["tsx", "src/fake-qdrant/index.ts"],
+    command: NODE,
+    args: ["scripts/mcp-launch.mjs", "fake-qdrant"],
     env: {
       FAKE_QDRANT_ENABLED: "1",
       FAKE_QDRANT_HTTP_PORT: "16333",
-      FAKE_QDRANT_DATA_DIR: path.join(ROOT, "data", "fake-qdrant"),
+      FAKE_QDRANT_DATA_DIR: path.join(ROOT, "data", "fake-qdrant-validate"),
+      MCP_TAKEOVER: "1",
     },
-    expectTools: ["fake_qdrant_list_collections", "fake_qdrant_query_points"],
+    expectTools: ["fake_qdrant_list_collections", "fake_qdrant_query_points", "fake_qdrant_status"],
     callTool: { name: "fake_qdrant_list_collections", arguments: {} },
     httpHealth: "http://127.0.0.1:16333/healthz",
+    expectHealthPid: true,
   },
   {
     name: "central-local-embeddings",
-    args: ["tsx", "src/local-embeddings/index.ts"],
+    command: NODE,
+    args: ["scripts/mcp-launch.mjs", "local-embeddings"],
     env: {
       MODEL_ID: "Xenova/all-MiniLM-L6-v2",
       MODEL_CACHE_DIR: path.join(ROOT, "model-cache"),
@@ -69,12 +79,14 @@ const SERVERS = [
   },
   {
     name: "central-docsearch",
-    args: ["tsx", "src/docsearch/index.ts"],
+    command: NODE,
+    args: ["scripts/mcp-launch.mjs", "docsearch"],
     env: {
       EMBEDDINGS_PROVIDER: "local",
-      DOCSEARCH_DATA_DIR: path.join(ROOT, "data", "docsearch"),
+      DOCSEARCH_DATA_DIR: path.join(ROOT, "data", "docsearch-validate"),
       LOCAL_EMBED_MODEL: "Xenova/all-MiniLM-L6-v2",
       LOCAL_MODEL_CACHE_DIR: path.join(ROOT, "model-cache"),
+      MCP_TAKEOVER: "1",
     },
     expectTools: ["doc-search", "doc-ingest", "doc-ingest-status"],
     callTool: { name: "doc-ingest-status", arguments: {} },
@@ -160,12 +172,11 @@ function killTree(child) {
 function probeServer(spec) {
   const timeoutMs = spec.timeoutMs ?? 25000;
   return new Promise((resolve) => {
-    const child = spawn(NPX, spec.args, {
+    const child = spawn(spec.command ?? NODE, spec.args, {
       cwd: ROOT,
       env: { ...process.env, ...spec.env },
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
-      shell: process.platform === "win32",
     });
 
     const stderrChunks = [];
@@ -294,6 +305,19 @@ function probeServer(spec) {
             finish(false, `HTTP ${spec.httpHealth} -> ${health.status} ${health.body}`);
             return;
           }
+          if (spec.expectHealthPid) {
+            let parsed;
+            try {
+              parsed = JSON.parse(health.body);
+            } catch {
+              finish(false, `HTTP ${spec.httpHealth} body is not JSON`);
+              return;
+            }
+            if (!Number.isInteger(parsed.pid)) {
+              finish(false, `HTTP ${spec.httpHealth} missing pid: ${health.body}`);
+              return;
+            }
+          }
         }
         finish(true, `${tools.length} tools`);
       } catch (error) {
@@ -303,8 +327,136 @@ function probeServer(spec) {
   });
 }
 
+async function runLifecycleChecks() {
+  const results = [];
+  const dataDir = path.join(ROOT, "data", "fake-qdrant-lifecycle");
+  const env = {
+    ...process.env,
+    FAKE_QDRANT_ENABLED: "1",
+    FAKE_QDRANT_HTTP_PORT: "16334",
+    FAKE_QDRANT_DATA_DIR: dataDir,
+    MCP_TAKEOVER: "1",
+  };
+
+  const spawnFq = (extraEnv) =>
+    spawn(NODE, ["scripts/mcp-launch.mjs", "fake-qdrant"], {
+      cwd: ROOT,
+      env: { ...env, ...extraEnv },
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+
+  process.stdout.write("- lifecycle stdin-close ... ");
+  const first = spawnFq({});
+  let ready = false;
+  first.stderr.on("data", (chunk) => {
+    if (/running on stdio/i.test(String(chunk))) {
+      ready = true;
+    }
+  });
+  const started = Date.now();
+  while (!ready && Date.now() - started < 15000) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  first.stdin.end();
+  const closed = await new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), 4000);
+    first.on("exit", () => {
+      clearTimeout(timer);
+      resolve(true);
+    });
+  });
+  if (!closed) {
+    killTree(first);
+    results.push({ name: "lifecycle-stdin-close", ok: false, detail: "did not exit within 4s" });
+    console.log("FAIL");
+  } else {
+    results.push({ name: "lifecycle-stdin-close", ok: true, detail: "exited" });
+    console.log("OK");
+  }
+
+  process.stdout.write("- lifecycle takeover ... ");
+  const holder = spawnFq({ MCP_TAKEOVER: "1" });
+  ready = false;
+  holder.stderr.on("data", (chunk) => {
+    if (/running on stdio/i.test(String(chunk))) {
+      ready = true;
+    }
+  });
+  const holdStart = Date.now();
+  while (!ready && Date.now() - holdStart < 15000) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  const second = spawnFq({ MCP_TAKEOVER: "1" });
+  const secondExit = await new Promise((resolve) => {
+    const timer = setTimeout(() => resolve("timeout"), 8000);
+    second.on("exit", (code) => {
+      clearTimeout(timer);
+      resolve(code);
+    });
+  });
+  const health = await waitForHttp("http://127.0.0.1:16334/healthz").catch((error) => ({
+    status: 0,
+    body: String(error),
+  }));
+  killTree(holder);
+  killTree(second);
+  if (health.status === 200 && secondExit === "timeout") {
+    results.push({ name: "lifecycle-takeover", ok: true, detail: "second instance serving" });
+    console.log("OK");
+  } else {
+    results.push({
+      name: "lifecycle-takeover",
+      ok: false,
+      detail: `secondExit=${secondExit} health=${health.status}`,
+    });
+    console.log("FAIL");
+  }
+
+  process.stdout.write("- lifecycle fail-fast ... ");
+  const keep = spawnFq({ MCP_TAKEOVER: "1" });
+  ready = false;
+  keep.stderr.on("data", (chunk) => {
+    if (/running on stdio/i.test(String(chunk))) {
+      ready = true;
+    }
+  });
+  const keepStart = Date.now();
+  while (!ready && Date.now() - keepStart < 15000) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  const blocked = spawnFq({ MCP_TAKEOVER: "0" });
+  const blockedCode = await new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      killTree(blocked);
+      resolve("timeout");
+    }, 5000);
+    blocked.on("exit", (code) => {
+      clearTimeout(timer);
+      resolve(code);
+    });
+  });
+  killTree(keep);
+  if (blockedCode !== 0 && blockedCode !== "timeout") {
+    results.push({ name: "lifecycle-fail-fast", ok: true, detail: `exit ${blockedCode}` });
+    console.log("OK");
+  } else {
+    results.push({
+      name: "lifecycle-fail-fast",
+      ok: false,
+      detail: `expected non-zero exit, got ${blockedCode}`,
+    });
+    console.log("FAIL");
+  }
+  return results;
+}
+
 async function main() {
   console.log(`Validating MCP servers from ${ROOT}\n`);
+  if (!fs.existsSync(LIFECYCLE_DIST)) {
+    console.error(`Missing ${LIFECYCLE_DIST}. Run npm run build -w src/mcp-lifecycle`);
+    process.exit(1);
+  }
   const results = [];
   for (const spec of SERVERS) {
     process.stdout.write(`- ${spec.name} ... `);
@@ -319,19 +471,20 @@ async function main() {
       }
     }
   }
+  results.push(...(await runLifecycleChecks()));
 
   const failed = results.filter((result) => !result.ok);
   console.log("\nSummary");
   for (const result of results) {
     console.log(
-      `  ${result.ok ? "PASS" : "FAIL"}  ${result.name}  ${result.tools.join(", ") || result.detail}`
+      `  ${result.ok ? "PASS" : "FAIL"}  ${result.name}  ${result.tools?.join(", ") || result.detail}`
     );
   }
   if (failed.length > 0) {
-    console.log(`\n${failed.length} of ${results.length} servers failed.`);
+    console.log(`\n${failed.length} of ${results.length} checks failed.`);
     process.exit(1);
   }
-  console.log(`\nAll ${results.length} MCP servers started and listed tools.`);
+  console.log(`\nAll ${results.length} checks passed.`);
 }
 
 main().catch((error) => {

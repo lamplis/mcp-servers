@@ -116,6 +116,7 @@ export interface DatabaseAdapter {
 
   // Cleanup operations
   cleanupDocumentChunks(documentId: number): Promise<void>;
+  deleteDocumentByUri(uri: string): Promise<boolean>;
 
   // Stats / inspection (no SQL)
   getIndexStats(): Promise<IndexStats>;

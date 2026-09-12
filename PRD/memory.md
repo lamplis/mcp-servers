@@ -49,7 +49,7 @@ Enable LLMs to maintain persistent memory across conversations, storing informat
 6. **Search Capabilities** - Search across names, types, and observations
 7. **Graph Traversal** - Retrieve entities with their relationships
 8. **Daily file logs** - JSONL logs beside the memory file (`logs/YYYY-MM-DD.log`), kept for 3 local days
-9. **Single-writer robustness** - In-memory graph cache, one mutation mutex, atomic `memory.jsonl` rewrite, and `{memoryFile}.lock` so a second MCP process cannot last-write-wins the same file. Concurrent clients share files safely; this is not multi-user access control.
+9. **Single-writer robustness** - In-memory graph cache, one mutation mutex, atomic `memory.jsonl` rewrite, and `{memoryFile}.lock` so a second MCP process cannot last-write-wins the same file. Identity file + verified takeover (`MCP_TAKEOVER`) align with fake-qdrant/docsearch. Concurrent clients share files safely; this is not multi-user access control.
 
 ## Tools/API Reference
 

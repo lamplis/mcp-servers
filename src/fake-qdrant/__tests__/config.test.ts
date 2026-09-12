@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import path from "node:path";
 import { loadConfig, ConfigError, getDefaultExternalModel } from "../config.js";
 
 describe("loadConfig", () => {
@@ -7,7 +8,10 @@ describe("loadConfig", () => {
     expect(config.httpEnabled).toBe(false);
     expect(config.httpHost).toBe("127.0.0.1");
     expect(config.httpPort).toBe(6333);
-    expect(config.dataDir).toBe("./data/fake-qdrant");
+    expect(path.isAbsolute(config.dataDir)).toBe(true);
+    expect(config.dataDir.replace(/\\/g, "/")).toMatch(/data\/fake-qdrant$/);
+    expect(config.dropEmptyChunks).toBe(false);
+    expect(config.takeover).toBe(true);
     expect(config.logDir).toBeNull();
     expect(config.logLevel).toBe("info");
     expect(config.logRetentionDays).toBe(3);
