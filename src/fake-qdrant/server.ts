@@ -374,15 +374,34 @@ function registerTools(
     {
       title: "Query fake Qdrant collection",
       description:
-        "Run a vector similarity search against a collection (brute-force cosine).",
+        "Run a vector similarity search against a collection (brute-force cosine). Default limit is 20 (tool-specific; HTTP Query API defaults to 10). scoreThreshold is optional with no implicit 0.",
       inputSchema: {
         collection: z.string().describe("Collection name."),
         vector: z.array(z.number()).describe("Query vector."),
-        limit: z.number().int().positive().optional().describe("Top K results."),
+        limit: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Top K results. Default 20 for this tool."),
+        offset: z
+          .number()
+          .int()
+          .nonnegative()
+          .optional()
+          .describe("Number of scored hits to skip."),
         scoreThreshold: z
           .number()
           .optional()
-          .describe("Only return results with cosine >= threshold."),
+          .describe("Only return results with cosine >= threshold. Omitted means no cutoff."),
+        filter: z
+          .any()
+          .optional()
+          .describe("Qdrant payload filter (must/should/must_not/min_should)."),
+        withVector: z
+          .boolean()
+          .optional()
+          .describe("Include the stored vector on each hit."),
       },
       outputSchema: {
         results: z.array(
@@ -390,18 +409,23 @@ function registerTools(
             id: z.union([z.string(), z.number()]),
             score: z.number(),
             payload: z.any().nullable(),
+            version: z.number().optional(),
+            vector: z.array(z.number()).optional(),
           })
         ),
       },
     },
-    async ({ collection, vector, limit, scoreThreshold }) =>
+    async ({ collection, vector, limit, offset, scoreThreshold, filter, withVector }) =>
       runLoggedTool(
         logger,
         "fake_qdrant_query_points",
         async () => {
           const results = await store.query(collection, vector, {
             limit: limit ?? 20,
-            scoreThreshold: scoreThreshold ?? 0,
+            offset,
+            scoreThreshold,
+            filter,
+            withVector,
           });
           return {
             content: [
@@ -417,7 +441,10 @@ function registerTools(
           collection,
           vectorLength: vector.length,
           limit: limit ?? 20,
-          scoreThreshold: scoreThreshold ?? 0,
+          offset: offset ?? 0,
+          scoreThreshold,
+          withVector: withVector === true,
+          hasFilter: filter != null,
           hits: Array.isArray(result.structuredContent?.results)
             ? result.structuredContent.results.length
             : 0,
@@ -490,7 +517,7 @@ function registerTools(
           const deleted = await store.deletePoints(
             collection,
             ids,
-            filter != null ? (payload) => matchFilter(payload, filter) : undefined,
+            filter != null ? (payload, id) => matchFilter(payload, filter, id) : undefined,
             filter
           );
           return {

@@ -103,6 +103,7 @@ async function main() {
       },
       slowRequestMs: config.slowRequestMs,
       flagPayloadPatterns: config.flagPayloadPatterns,
+      strictCreate: config.strictCreate,
     });
 
   if (config.httpEnabled) {

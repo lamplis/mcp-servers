@@ -23,6 +23,7 @@ export interface FakeQdrantConfig {
   flagPayloadPatterns: string[];
   slowRequestMs: number;
   takeover: boolean;
+  strictCreate: boolean;
 }
 
 const DEFAULT_EXTERNAL_MODEL = "bge-large-en-v1.5";
@@ -71,6 +72,7 @@ export function loadConfig(
     ),
     slowRequestMs: parsePositiveInt(env.FAKE_QDRANT_SLOW_MS, 1000),
     takeover: env.MCP_TAKEOVER !== "0",
+    strictCreate: env.FAKE_QDRANT_STRICT_CREATE === "1",
   };
 }
 

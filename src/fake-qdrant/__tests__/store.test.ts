@@ -157,4 +157,44 @@ describe("Fake Qdrant JSONL store", () => {
     expect(removed).toBe(1);
     expect(await store.countPoints("roo")).toBe(1);
   });
+
+  it("increments point version on re-upsert and survives reload", async () => {
+    await store.createCollection("ver", { size: 2 });
+    await store.upsertPoints("ver", [{ id: 1, vector: [1, 0], payload: { v: 1 } }]);
+    const first = await store.query("ver", [1, 0], { limit: 1 });
+    expect(first[0]?.version).toBe(1);
+    await store.upsertPoints("ver", [{ id: 1, vector: [0, 1], payload: { v: 2 } }]);
+    const second = await store.query("ver", [0, 1], { limit: 1 });
+    expect(second[0]?.version).toBe(2);
+    await store.close();
+    const reloaded = await Store.create({ dataDir: testDataDir });
+    const after = await reloaded.query("ver", [0, 1], { limit: 1 });
+    expect(after[0]?.version).toBe(2);
+    expect(after[0]?.payload).toEqual({ v: 2 });
+    await reloaded.close();
+  });
+
+  it("updates payload with set, overwrite, delete, and clear", async () => {
+    await store.createCollection("pay", { size: 2 });
+    await store.upsertPoints("pay", [
+      { id: 1, vector: [1, 0], payload: { a: 1, b: 2 } },
+      { id: 2, vector: [0, 1], payload: { a: 3 } },
+    ]);
+    await store.updatePayload("pay", { ids: [1] }, "set", { c: 3 });
+    const setHits = await store.retrieve("pay", [1]);
+    expect(setHits[0]?.payload).toEqual({ a: 1, b: 2, c: 3 });
+    await store.updatePayload("pay", { ids: [1] }, "overwrite", { only: true });
+    expect((await store.retrieve("pay", [1]))[0]?.payload).toEqual({ only: true });
+    await store.updatePayload("pay", { ids: [1] }, "delete", ["only"]);
+    expect((await store.retrieve("pay", [1]))[0]?.payload).toEqual({});
+    await store.updatePayload("pay", { filter: { key: "a", match: { value: 3 } } }, "clear");
+    expect((await store.retrieve("pay", [2]))[0]?.payload).toEqual({});
+  });
+
+  it("rejects ensureCollection in strict mode when the name exists", async () => {
+    await store.ensureCollection("keep", { size: 2 });
+    await expect(
+      store.ensureCollection("keep", { size: 2, strict: true })
+    ).rejects.toMatchObject({ name: "CollectionExistsError" });
+  });
 });

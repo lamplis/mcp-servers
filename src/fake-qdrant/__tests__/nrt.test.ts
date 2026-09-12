@@ -177,7 +177,7 @@ describe("Fake Qdrant NRT (Non-Regression Test)", () => {
     const res = await request(
       "POST",
       `/collections/${COLLECTION}/points/query`,
-      { vector: [1, 0, 0, 0], limit: 3 }
+      { vector: [1, 0, 0, 0], limit: 3, with_payload: true }
     );
     expect(res.status).toBe(200);
     const hits = queryHits(res.data);

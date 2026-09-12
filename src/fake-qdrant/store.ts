@@ -18,7 +18,7 @@ import {
 import {
   candidateIdsFromFilter,
   matchFilter,
-  payloadFieldString,
+  payloadFieldTokens,
   type KeywordPostings,
 } from "./qdrant-filter.js";
 
@@ -31,6 +31,7 @@ export interface CollectionMeta {
   pointsCount?: number;
   createdAt?: string;
   updatedAt?: string;
+  operationId?: number;
 }
 
 export interface CollectionInfo {
@@ -57,18 +58,31 @@ export interface PointRecord {
   id: string | number;
   vector: number[];
   payload: unknown;
+  version?: number;
 }
 
 export interface QueryHit {
   id: string | number;
   score: number;
   payload: unknown;
+  version?: number;
+  vector?: number[];
 }
 
 export interface QueryOptions {
   limit?: number;
+  offset?: number;
   scoreThreshold?: number;
   filter?: unknown;
+  withVector?: boolean;
+}
+
+export type PayloadUpdateMode = "set" | "overwrite" | "delete" | "clear";
+
+export interface PayloadSelector {
+  ids?: (string | number)[];
+  filter?: unknown;
+  key?: string;
 }
 
 export interface ScrollOptions {
@@ -104,6 +118,20 @@ export class CollectionSizeMismatchError extends Error {
   }
 }
 
+export class CollectionExistsError extends Error {
+  constructor(name: string) {
+    super(`Collection ${name} already exists`);
+    this.name = "CollectionExistsError";
+  }
+}
+
+export class PointNotFoundError extends Error {
+  constructor(id: string | number) {
+    super(`Not found: point ${id}`);
+    this.name = "PointNotFoundError";
+  }
+}
+
 export const AUTO_COMPACT_MULTIPLIER = 2;
 export const AUTO_COMPACT_EXTRA_LINES = 500;
 export const QUERY_YIELD_EVERY = 256;
@@ -121,6 +149,7 @@ interface LoadedCollection {
   postings: KeywordPostings;
   dirty: boolean;
   jsonlLines: number;
+  opCounter: number;
 }
 
 /**
@@ -261,8 +290,8 @@ export class Store {
     const fields = loaded.meta.indexes ?? [];
     const id = String(point.id);
     for (const field of fields) {
-      const value = payloadFieldString(point.payload, field);
-      if (value === undefined) {
+      const tokens = payloadFieldTokens(point.payload, field);
+      if (tokens.length === 0) {
         continue;
       }
       let byValue = loaded.postings.get(field);
@@ -270,12 +299,14 @@ export class Store {
         byValue = new Map();
         loaded.postings.set(field, byValue);
       }
-      let ids = byValue.get(value);
-      if (!ids) {
-        ids = new Set();
-        byValue.set(value, ids);
+      for (const value of tokens) {
+        let ids = byValue.get(value);
+        if (!ids) {
+          ids = new Set();
+          byValue.set(value, ids);
+        }
+        ids.add(id);
       }
-      ids.add(id);
     }
   }
 
@@ -283,20 +314,31 @@ export class Store {
     const fields = loaded.meta.indexes ?? [];
     const id = String(point.id);
     for (const field of fields) {
-      const value = payloadFieldString(point.payload, field);
-      if (value === undefined) {
+      const tokens = payloadFieldTokens(point.payload, field);
+      if (tokens.length === 0) {
         continue;
       }
       const byValue = loaded.postings.get(field);
-      const ids = byValue?.get(value);
-      if (!ids) {
+      if (!byValue) {
         continue;
       }
-      ids.delete(id);
-      if (ids.size === 0) {
-        byValue?.delete(value);
+      for (const value of tokens) {
+        const ids = byValue.get(value);
+        if (!ids) {
+          continue;
+        }
+        ids.delete(id);
+        if (ids.size === 0) {
+          byValue.delete(value);
+        }
       }
     }
+  }
+
+  private nextVersion(loaded: LoadedCollection): number {
+    loaded.opCounter += 1;
+    loaded.meta.operationId = loaded.opCounter;
+    return loaded.opCounter;
   }
 
   private postingListSizes(loaded: LoadedCollection): Record<string, number> {
@@ -329,6 +371,7 @@ export class Store {
         pointsCount?: unknown;
         createdAt?: unknown;
         updatedAt?: unknown;
+        operationId?: unknown;
       };
       const size = Number(parsed.size);
       if (!Number.isInteger(size) || size <= 0) {
@@ -338,6 +381,7 @@ export class Store {
         typeof parsed.distance === "string" ? parsed.distance : undefined
       );
       const pointsCount = Number(parsed.pointsCount);
+      const operationId = Number(parsed.operationId);
       return {
         size,
         distance,
@@ -345,6 +389,7 @@ export class Store {
         pointsCount: Number.isInteger(pointsCount) && pointsCount >= 0 ? pointsCount : 0,
         createdAt: typeof parsed.createdAt === "string" ? parsed.createdAt : undefined,
         updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : undefined,
+        operationId: Number.isInteger(operationId) && operationId >= 0 ? operationId : 0,
       };
     } catch {
       return null;
@@ -377,6 +422,7 @@ export class Store {
           const record = JSON.parse(line) as PointRecord & {
             op?: string;
             id?: unknown;
+            version?: unknown;
           };
           if (record.op === "delete" && isValidPointId(record.id)) {
             points.delete(String(record.id));
@@ -385,10 +431,12 @@ export class Store {
           if (!isValidPointId(record.id) || !Array.isArray(record.vector)) {
             continue;
           }
+          const versionRaw = Number(record.version);
           points.set(String(record.id), {
             id: record.id,
             vector: record.vector,
             payload: record.payload,
+            version: Number.isInteger(versionRaw) ? versionRaw : 0,
           });
         } catch {
           // Skip malformed lines
@@ -398,13 +446,21 @@ export class Store {
       // Missing points.jsonl is an empty collection
     }
 
+    let opCounter = meta.operationId ?? 0;
+    for (const point of points.values()) {
+      if ((point.version ?? 0) > opCounter) {
+        opCounter = point.version ?? 0;
+      }
+    }
+
     const loaded: LoadedCollection = {
       name,
-      meta: { ...meta, pointsCount: points.size },
+      meta: { ...meta, pointsCount: points.size, operationId: opCounter },
       points,
       postings: new Map(),
       dirty: false,
       jsonlLines,
+      opCounter,
     };
     this.rebuildPostings(loaded);
     this.collections.set(name, loaded);
@@ -423,6 +479,7 @@ export class Store {
 
   private async persistMetaCounts(loaded: LoadedCollection): Promise<void> {
     loaded.meta.pointsCount = loaded.points.size;
+    loaded.meta.operationId = loaded.opCounter;
     await this.writeMeta(loaded.name, loaded.meta);
   }
 
@@ -431,7 +488,14 @@ export class Store {
       await fs.mkdir(this.collectionDir(loaded.name), { recursive: true });
       const lines: string[] = [];
       for (const point of loaded.points.values()) {
-        lines.push(JSON.stringify({ id: point.id, vector: point.vector, payload: point.payload }));
+        lines.push(
+          JSON.stringify({
+            id: point.id,
+            vector: point.vector,
+            payload: point.payload,
+            version: point.version ?? 0,
+          })
+        );
       }
       const body = lines.length > 0 ? `${lines.join("\n")}\n` : "";
       await atomicWriteFile(this.pointsPath(loaded.name), body);
@@ -575,11 +639,20 @@ export class Store {
       const now = new Date().toISOString();
       const loaded: LoadedCollection = {
         name,
-        meta: { size, distance, indexes: [], pointsCount: 0, createdAt: now, updatedAt: now },
+        meta: {
+          size,
+          distance,
+          indexes: [],
+          pointsCount: 0,
+          createdAt: now,
+          updatedAt: now,
+          operationId: 0,
+        },
         points: new Map(),
         postings: new Map(),
         dirty: false,
         jsonlLines: 0,
+        opCounter: 0,
       };
       this.collections.set(name, loaded);
       await this.writeMeta(name, loaded.meta);
@@ -593,7 +666,7 @@ export class Store {
 
   async ensureCollection(
     name: string,
-    meta: { size: number; distance?: string }
+    meta: { size: number; distance?: string; strict?: boolean }
   ): Promise<{ created: boolean; info: CollectionInfo }> {
     this.assertWritable();
     const size = meta.size;
@@ -604,6 +677,9 @@ export class Store {
     return this.mutexFor(name).run(async () => {
       const existing = await this.loadCollectionUnlocked(name);
       if (existing) {
+        if (meta.strict) {
+          throw new CollectionExistsError(name);
+        }
         if (existing.meta.size !== size) {
           throw new CollectionSizeMismatchError(name, existing.meta.size, size);
         }
@@ -612,11 +688,20 @@ export class Store {
       const now = new Date().toISOString();
       const loaded: LoadedCollection = {
         name,
-        meta: { size, distance, indexes: [], pointsCount: 0, createdAt: now, updatedAt: now },
+        meta: {
+          size,
+          distance,
+          indexes: [],
+          pointsCount: 0,
+          createdAt: now,
+          updatedAt: now,
+          operationId: 0,
+        },
         points: new Map(),
         postings: new Map(),
         dirty: false,
         jsonlLines: 0,
+        opCounter: 0,
       };
       this.collections.set(name, loaded);
       await this.writeMeta(name, loaded.meta);
@@ -676,7 +761,7 @@ export class Store {
   async deletePoints(
     name: string,
     pointIds?: (string | number)[],
-    filterFn?: (payload: unknown) => boolean,
+    filterFn?: (payload: unknown, id?: string | number) => boolean,
     filterAst?: unknown
   ): Promise<number> {
     this.assertWritable();
@@ -692,21 +777,27 @@ export class Store {
           toDelete.add(String(id));
         }
       }
-      if (filterFn) {
+      if (filterFn || filterAst !== undefined) {
         const candidates =
           filterAst !== undefined
             ? candidateIdsFromFilter(filterAst, loaded.postings)
             : null;
+        const matches = (point: PointRecord): boolean => {
+          if (filterAst !== undefined) {
+            return matchFilter(point.payload ?? null, filterAst, point.id);
+          }
+          return filterFn ? filterFn(point.payload ?? null, point.id) : false;
+        };
         if (candidates) {
           for (const key of candidates) {
             const point = loaded.points.get(key);
-            if (point && filterFn(point.payload ?? null)) {
+            if (point && matches(point)) {
               toDelete.add(key);
             }
           }
         } else {
           for (const [key, point] of loaded.points) {
-            if (filterFn(point.payload ?? null)) {
+            if (matches(point)) {
               toDelete.add(key);
             }
           }
@@ -781,6 +872,7 @@ export class Store {
           id: point.id,
           vector: point.vector,
           payload: point.payload,
+          version: this.nextVersion(loaded),
         };
         loaded.points.set(key, record);
         this.indexPoint(loaded, record);
@@ -803,7 +895,7 @@ export class Store {
 
   async query(
     name: string,
-    queryVector: number[],
+    query: number[] | { id: string | number },
     options: QueryOptions = {}
   ): Promise<QueryHit[]> {
     this.assertWritable();
@@ -811,6 +903,19 @@ export class Store {
       const loaded = await this.loadCollectionUnlocked(name);
       if (!loaded) {
         throw new Error(`Collection not found: ${name}`);
+      }
+
+      let queryVector: number[];
+      let excludeId: string | undefined;
+      if (Array.isArray(query)) {
+        queryVector = query;
+      } else {
+        const origin = loaded.points.get(String(query.id));
+        if (!origin) {
+          throw new PointNotFoundError(query.id);
+        }
+        queryVector = origin.vector;
+        excludeId = String(origin.id);
       }
 
       const dimension = loaded.meta.size;
@@ -825,21 +930,30 @@ export class Store {
       }
 
       let points = [...loaded.points.values()];
+      if (excludeId !== undefined) {
+        points = points.filter((point) => String(point.id) !== excludeId);
+      }
       if (options.filter !== undefined) {
         const candidates = candidateIdsFromFilter(options.filter, loaded.postings);
         if (candidates) {
           points = [...candidates]
             .map((id) => loaded.points.get(id))
             .filter((point): point is PointRecord => Boolean(point));
+          if (excludeId !== undefined) {
+            points = points.filter((point) => String(point.id) !== excludeId);
+          }
         }
-        points = points.filter((point) => matchFilter(point.payload ?? null, options.filter));
+        points = points.filter((point) =>
+          matchFilter(point.payload ?? null, options.filter, point.id)
+        );
       }
 
-      return { points };
+      return { points, queryVector };
     });
 
     const limit = Math.max(1, options.limit ?? 20);
-    const scoreThreshold = options.scoreThreshold ?? 0;
+    const offset = Math.max(0, options.offset ?? 0);
+    const scoreThreshold = options.scoreThreshold;
     const scored: QueryHit[] = [];
 
     for (let i = 0; i < snapshot.points.length; i += 1) {
@@ -847,18 +961,136 @@ export class Store {
         await yieldEventLoop();
       }
       const point = snapshot.points[i];
-      const score = cosineSimilarity(queryVector, point.vector);
-      if (score >= scoreThreshold) {
-        scored.push({
-          id: point.id,
-          score,
-          payload: point.payload ?? null,
-        });
+      const score = cosineSimilarity(snapshot.queryVector, point.vector);
+      if (scoreThreshold === undefined || score >= scoreThreshold) {
+        scored.push(toQueryHit(point, score, options.withVector));
       }
     }
 
     scored.sort((a, b) => b.score - a.score);
-    return scored.slice(0, limit);
+    return scored.slice(offset, offset + limit);
+  }
+
+  async listByIds(
+    name: string,
+    options: QueryOptions = {}
+  ): Promise<QueryHit[]> {
+    this.assertWritable();
+    return this.mutexFor(name).run(async () => {
+      const loaded = await this.loadCollectionUnlocked(name);
+      if (!loaded) {
+        throw new Error(`Collection not found: ${name}`);
+      }
+      let points = [...loaded.points.values()];
+      if (options.filter !== undefined) {
+        points = points.filter((point) =>
+          matchFilter(point.payload ?? null, options.filter, point.id)
+        );
+      }
+      points.sort((a, b) => comparePointIds(a.id, b.id));
+      const limit = Math.max(1, options.limit ?? 20);
+      const offset = Math.max(0, options.offset ?? 0);
+      return points
+        .slice(offset, offset + limit)
+        .map((point) => toQueryHit(point, 0, options.withVector));
+    });
+  }
+
+  async updatePayload(
+    name: string,
+    selector: PayloadSelector,
+    mode: PayloadUpdateMode,
+    payloadOrKeys?: unknown
+  ): Promise<{ updated: number; operationId: number }> {
+    this.assertWritable();
+    return this.mutexFor(name).run(async () => {
+      const loaded = await this.loadCollectionUnlocked(name);
+      if (!loaded) {
+        throw new Error(`Collection not found: ${name}`);
+      }
+      const selected = selectPoints(loaded, selector);
+      const toWrite: PointRecord[] = [];
+      for (const point of selected) {
+        this.unindexPoint(loaded, point);
+        const nextPayload = applyPayloadUpdate(
+          point.payload,
+          mode,
+          payloadOrKeys,
+          selector.key
+        );
+        const record: PointRecord = {
+          id: point.id,
+          vector: point.vector,
+          payload: nextPayload,
+          version: this.nextVersion(loaded),
+        };
+        loaded.points.set(String(point.id), record);
+        this.indexPoint(loaded, record);
+        toWrite.push(record);
+      }
+      if (toWrite.length === 0) {
+        return { updated: 0, operationId: loaded.opCounter };
+      }
+      loaded.dirty = true;
+      loaded.meta.updatedAt = new Date().toISOString();
+      await this.appendPoints(name, toWrite);
+      loaded.jsonlLines += toWrite.length;
+      loaded.meta.pointsCount = loaded.points.size;
+      await this.persistMetaCounts(loaded);
+      if (this.shouldAutoCompact(loaded)) {
+        await this.rewritePoints(loaded);
+      }
+      return { updated: toWrite.length, operationId: loaded.opCounter };
+    });
+  }
+
+  async getCollectionInfoQdrant(name: string): Promise<Record<string, unknown> | null> {
+    this.assertWritable();
+    return this.mutexFor(name).run(async () => {
+      const loaded = await this.loadCollectionUnlocked(name);
+      if (!loaded) {
+        return null;
+      }
+      const count = loaded.points.size;
+      const payloadSchema: Record<string, { data_type: string; points: number }> = {};
+      for (const field of loaded.meta.indexes ?? []) {
+        let pointsWithField = 0;
+        for (const point of loaded.points.values()) {
+          if (payloadFieldTokens(point.payload, field).length > 0) {
+            pointsWithField += 1;
+          }
+        }
+        payloadSchema[field] = { data_type: "keyword", points: pointsWithField };
+      }
+      return {
+        name: loaded.name,
+        vectors: { ...loaded.meta },
+        pointsCount: count,
+        createdAt: loaded.meta.createdAt,
+        updatedAt: loaded.meta.updatedAt,
+        status: "green",
+        optimizer_status: "ok",
+        vectors_count: count,
+        indexed_vectors_count: count,
+        points_count: count,
+        segments_count: 1,
+        config: {
+          params: {
+            vectors: {
+              size: loaded.meta.size,
+              distance: loaded.meta.distance,
+            },
+            shard_number: 1,
+            replication_factor: 1,
+            on_disk_payload: true,
+          },
+          hnsw_config: {},
+          optimizer_config: {},
+          wal_config: {},
+        },
+        payload_schema: payloadSchema,
+      };
+    });
   }
 
   async scroll(
@@ -875,7 +1107,7 @@ export class Store {
       let points = [...loaded.points.values()];
       if (options.filter !== undefined) {
         points = points.filter((point) =>
-          matchFilter(point.payload ?? null, options.filter)
+          matchFilter(point.payload ?? null, options.filter, point.id)
         );
       }
       const offset = Math.max(0, options.offset ?? 0);
@@ -932,7 +1164,7 @@ export class Store {
       }
       let count = 0;
       for (const point of loaded.points.values()) {
-        if (matchFilter(point.payload ?? null, filter)) {
+        if (matchFilter(point.payload ?? null, filter, point.id)) {
           count += 1;
         }
       }
@@ -982,6 +1214,124 @@ export class Store {
       this.processLock = null;
     }
   }
+}
+
+function toQueryHit(
+  point: PointRecord,
+  score: number,
+  withVector?: boolean
+): QueryHit {
+  const hit: QueryHit = {
+    id: point.id,
+    score,
+    payload: point.payload ?? null,
+    version: point.version ?? 0,
+  };
+  if (withVector) {
+    hit.vector = point.vector;
+  }
+  return hit;
+}
+
+function comparePointIds(a: string | number, b: string | number): number {
+  const aNum = typeof a === "number";
+  const bNum = typeof b === "number";
+  if (aNum && bNum) {
+    return a - b;
+  }
+  if (aNum) {
+    return -1;
+  }
+  if (bNum) {
+    return 1;
+  }
+  return String(a).localeCompare(String(b));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value != null && typeof value === "object" && !Array.isArray(value);
+}
+
+function selectPoints(
+  loaded: LoadedCollection,
+  selector: PayloadSelector
+): PointRecord[] {
+  const selected: PointRecord[] = [];
+  if (selector.ids && selector.ids.length > 0) {
+    for (const id of selector.ids) {
+      const point = loaded.points.get(String(id));
+      if (!point) {
+        continue;
+      }
+      if (
+        selector.filter !== undefined &&
+        !matchFilter(point.payload ?? null, selector.filter, point.id)
+      ) {
+        continue;
+      }
+      selected.push(point);
+    }
+    return selected;
+  }
+  if (selector.filter !== undefined) {
+    for (const point of loaded.points.values()) {
+      if (matchFilter(point.payload ?? null, selector.filter, point.id)) {
+        selected.push(point);
+      }
+    }
+  }
+  return selected;
+}
+
+function setNested(
+  target: Record<string, unknown>,
+  keyPath: string,
+  value: unknown
+): Record<string, unknown> {
+  const keys = keyPath.split(".");
+  let cursor: Record<string, unknown> = target;
+  for (let i = 0; i < keys.length - 1; i += 1) {
+    const key = keys[i];
+    const next = cursor[key];
+    if (!isRecord(next)) {
+      cursor[key] = {};
+    }
+    cursor = cursor[key] as Record<string, unknown>;
+  }
+  const last = keys[keys.length - 1];
+  if (last) {
+    cursor[last] = value;
+  }
+  return target;
+}
+
+function applyPayloadUpdate(
+  current: unknown,
+  mode: PayloadUpdateMode,
+  payloadOrKeys: unknown,
+  key?: string
+): unknown {
+  const base = isRecord(current) ? { ...current } : {};
+  if (mode === "clear") {
+    return {};
+  }
+  if (mode === "overwrite") {
+    return isRecord(payloadOrKeys) ? payloadOrKeys : {};
+  }
+  if (mode === "set") {
+    if (typeof key === "string" && key.length > 0) {
+      return setNested(base, key, payloadOrKeys);
+    }
+    return { ...base, ...(isRecord(payloadOrKeys) ? payloadOrKeys : {}) };
+  }
+  const keys = Array.isArray(payloadOrKeys) ? payloadOrKeys : [];
+  const out = { ...base };
+  for (const field of keys) {
+    if (typeof field === "string") {
+      delete out[field];
+    }
+  }
+  return out;
 }
 
 function yieldEventLoop(): Promise<void> {

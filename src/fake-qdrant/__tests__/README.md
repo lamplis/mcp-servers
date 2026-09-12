@@ -31,15 +31,25 @@ The integration tests cover the following Qdrant HTTP API endpoints:
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/collections` | GET | List all collections |
-| `/collections/{name}` | PUT | Create a collection |
-| `/collections/{name}` | GET | Get collection info |
+| `/collections/{name}` | PUT | Create a collection (idempotent unless strict create) |
+| `/collections/{name}` | GET | Get collection info (Qdrant-shaped) |
+| `/collections/{name}/exists` | GET | Collection exists flag |
 | `/collections/{name}` | DELETE | Delete a collection |
 
 ### Points
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/collections/{name}/points` | PUT | Upsert points |
-| `/collections/{name}/points/query` | POST | Query/search points |
+| `/collections/{name}/points` | POST | Retrieve by ids |
+| `/collections/{name}/points/query` | POST | Query API (canonical + Roo dialect) |
+| `/collections/{name}/points/search` | POST | Legacy Search API |
+| `/collections/{name}/points/query/batch` | POST | Batch query |
+| `/collections/{name}/points/search/batch` | POST | Batch search |
+| `/collections/{name}/points/payload` | POST/PUT | Set / overwrite payload |
+| `/collections/{name}/points/payload/delete` | POST | Delete payload keys |
+| `/collections/{name}/points/payload/clear` | POST | Clear payload |
+| `/collections/{name}/points/scroll` | POST | Scroll points |
+| `/collections/{name}/points/count` | POST | Count points |
 | `/collections/{name}/points/delete` | POST | Delete points (by ID or filter) |
 
 ### Collection Management

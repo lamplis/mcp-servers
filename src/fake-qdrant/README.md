@@ -111,17 +111,43 @@ When enabled, the server exposes a Qdrant-compatible HTTP API:
 | `GET` | `/healthz` | Health check |
 | `GET` | `/metrics` | Collection stats and lock busy flag |
 | `GET` | `/collections` | List all collections (real point counts) |
-| `PUT` | `/collections/{name}` | Create collection (idempotent if size matches) |
-| `GET` | `/collections/{name}` | Get collection info |
+| `PUT` | `/collections/{name}` | Create collection (idempotent if size matches; 409 if `FAKE_QDRANT_STRICT_CREATE=1`) |
+| `GET` | `/collections/{name}` | Get collection info (Qdrant-shaped + extra local fields) |
+| `GET` | `/collections/{name}/exists` | `{ result: { exists } }` |
 | `DELETE` | `/collections/{name}` | Delete a collection |
 | `PUT` | `/collections/{name}/index` | Record a payload keyword field |
 | `PUT` | `/collections/{name}/points` | Upsert points |
 | `POST` | `/collections/{name}/points` | Retrieve points by id |
-| `POST` | `/collections/{name}/points/query` | Query/search points (`result.points`) |
+| `POST` | `/collections/{name}/points/query` | Query API (`result.points`; default `limit` 10, `with_payload` false) |
+| `POST` | `/collections/{name}/points/search` | Legacy Search API (`result` is a flat scored array) |
+| `POST` | `/collections/{name}/points/query/batch` | `{ searches }` → `result: [{ points }]` |
+| `POST` | `/collections/{name}/points/search/batch` | `{ searches }` → `result: ScoredPoint[][]` |
+| `POST` | `/collections/{name}/points/payload` | Set (merge) payload |
+| `PUT` | `/collections/{name}/points/payload` | Overwrite payload |
+| `POST` | `/collections/{name}/points/payload/delete` | Delete payload keys |
+| `POST` | `/collections/{name}/points/payload/clear` | Clear payload |
 | `POST` | `/collections/{name}/points/scroll` | Page through points |
 | `POST` | `/collections/{name}/points/count` | Count points (optional filter) |
 | `POST` | `/collections/{name}/points/delete` | Delete points by ID or filter |
 | `POST` | `/collections/{name}/compact` | Compact collection (custom endpoint) |
+
+Query bodies accept canonical Qdrant shapes (`query: number[]`, `{ nearest }`, nearest-by-id, omitted query = list by id) plus the Roo dialect (`vector`, `query.vector`, `query.nearest.vector`). `prefetch`, `using`, `params`, `lookup_from`, `shard_key`, and `fusion`/`recommend`/`discover`/`sample`/`formula` return **400** `Unsupported query: <field>`.
+
+### Supported filters
+
+- Groups: `must`, `should`, `must_not`, `min_should`
+- `match.value` / `match.any` / `match.except` (array-element + type-strict)
+- `range`, `datetime_range`, `has_id`, `is_empty`, `is_null`
+
+Anything else (`match.text`, geo, `values_count`, `nested`, `has_vector`, `slice`) returns **400** `Unsupported filter: <condition>`.
+
+### Not implemented
+
+- Distance metrics other than Cosine
+- Named / sparse vectors
+- Prefetch, fusion, recommend, discover, sample, formula
+- Scroll offset as a point id (numeric index only)
+- Snapshots and collection aliases
 
 ## Installation and Setup
 
@@ -225,6 +251,7 @@ Add to `.cursor/mcp.json`:
 | `FAKE_QDRANT_LOG_DIR` | `{dataDir}/logs` | Directory for daily JSONL debug logs |
 | `FAKE_QDRANT_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` |
 | `FAKE_QDRANT_LOG_RETENTION_DAYS` | `3` | Keep this many local calendar days of log files |
+| `FAKE_QDRANT_STRICT_CREATE` | `0` | Set to `1` so `PUT /collections/{name}` returns 409 when the collection already exists |
 
 ## Usage Examples
 
@@ -552,9 +579,10 @@ src/fake-qdrant/
 ## Limitations
 
 - **Distance Metrics:** Only Cosine similarity is currently supported
-- **Filters:** Nested must/should/must_not on payload fields (including `pathSegments.N`)
-- **Scroll/Pagination:** `POST .../points/scroll` with limit/offset
+- **Filters:** Nested must/should/must_not/min_should plus match/range/datetime_range/has_id/is_empty/is_null. Unsupported conditions return 400.
+- **Scroll/Pagination:** `POST .../points/scroll` with numeric limit/offset (not point-id offset)
 - **Sharding:** Single-node only, no distributed support
+- **Not implemented:** named/sparse vectors, prefetch/fusion, recommend/discover, snapshots, aliases
 - **Concurrency:** Overlapping requests in one process share files safely (one disk writer). A second process on the same data dir fails instead of corrupting JSONL. This is not multi-tenant isolation or authentication.
 
 ## License

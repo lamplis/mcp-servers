@@ -12,6 +12,7 @@ describe("loadConfig", () => {
     expect(config.dataDir.replace(/\\/g, "/")).toMatch(/data\/fake-qdrant$/);
     expect(config.dropEmptyChunks).toBe(false);
     expect(config.takeover).toBe(true);
+    expect(config.strictCreate).toBe(false);
     expect(config.logDir).toBeNull();
     expect(config.logLevel).toBe("info");
     expect(config.logRetentionDays).toBe(3);
@@ -121,6 +122,11 @@ describe("loadConfig", () => {
       FAKE_QDRANT_LOCAL_EMBEDDINGS_TARGET: "http://localhost:4000",
     });
     expect(config.localEmbeddingsTarget).toBe("http://localhost:4000");
+  });
+
+  it("should parse FAKE_QDRANT_STRICT_CREATE=1", () => {
+    const config = loadConfig({ FAKE_QDRANT_STRICT_CREATE: "1" });
+    expect(config.strictCreate).toBe(true);
   });
 });
 

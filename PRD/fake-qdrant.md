@@ -115,17 +115,31 @@ Give local development a Qdrant-like collection and query surface that works on 
 | `GET` | `/` or `/healthz` | Liveness |
 | `GET` | `/metrics` | Stats + lock busy |
 | `GET` | `/collections` | List collections with point counts |
-| `GET` | `/collections/{name}` | Collection metadata |
-| `PUT` | `/collections/{name}` | Create or no-op if same size (409 on mismatch) |
+| `PUT` | `/collections/{name}` | Create or no-op if same size (409 on mismatch; 409 if `FAKE_QDRANT_STRICT_CREATE=1`) |
+| `GET` | `/collections/{name}` | Collection metadata (Qdrant-shaped + extras) |
+| `GET` | `/collections/{name}/exists` | `{ exists }` |
 | `DELETE` | `/collections/{name}` | Delete collection |
 | `PUT` | `/collections/{name}/index` | Payload keyword field name |
 | `PUT` | `/collections/{name}/points` | Upsert points |
 | `POST` | `/collections/{name}/points` | Retrieve by ids |
-| `POST` | `/collections/{name}/points/query` | Vector search (`result.points`, optional filter) |
+| `POST` | `/collections/{name}/points/query` | Query API (`result.points`; default limit 10) |
+| `POST` | `/collections/{name}/points/search` | Legacy search (`result` is a scored array) |
+| `POST` | `/collections/{name}/points/query/batch` | Batch query |
+| `POST` | `/collections/{name}/points/search/batch` | Batch search |
+| `POST` | `/collections/{name}/points/payload` | Set payload (merge) |
+| `PUT` | `/collections/{name}/points/payload` | Overwrite payload |
+| `POST` | `/collections/{name}/points/payload/delete` | Delete payload keys |
+| `POST` | `/collections/{name}/points/payload/clear` | Clear payload |
 | `POST` | `/collections/{name}/points/scroll` | Page points |
 | `POST` | `/collections/{name}/points/count` | Count points |
 | `POST` | `/collections/{name}/points/delete` | Delete by id or nested filter |
 | `POST` | `/collections/{name}/compact` | Rewrite unique JSONL snapshot |
+
+**Query shapes:** `query` as a number array, `{ nearest }`, nearest-by-id, or omitted (list by id, `score: 0`). Roo dialect `vector` / `query.vector` / `query.nearest.vector` still works. Default HTTP `limit` is 10; MCP `fake_qdrant_query_points` still defaults to 20. `score_threshold` has no implicit 0. `with_payload` defaults to false (boolean, include list, or `{include|exclude}`). Hits are `{ id, version, score, payload?, vector? }`.
+
+**Filters:** `must` / `should` / `must_not` / `min_should`, `match.value|any|except` (array-element, type-strict), `range`, `datetime_range`, `has_id`, `is_empty`, `is_null`. Unsupported conditions return 400.
+
+**Not implemented:** metrics other than Cosine, named/sparse vectors, prefetch/fusion, recommend/discover, scroll-by-id offset, snapshots, aliases.
 
 ## Use Cases and User Stories
 
@@ -185,6 +199,7 @@ Give local development a Qdrant-like collection and query surface that works on 
 - `FAKE_QDRANT_LOG_DIR` - daily JSONL debug logs (default `{resolvedDataDir}/logs`)
 - `FAKE_QDRANT_LOG_LEVEL` - `debug` | `info` | `warn` | `error` (default `info`)
 - `FAKE_QDRANT_LOG_RETENTION_DAYS` - keep this many local calendar days of log files (default `3`)
+- `FAKE_QDRANT_STRICT_CREATE` - `1` makes `PUT /collections/{name}` return 409 when the name already exists (default stays idempotent for Roo)
 - Optional helper only (not used by MCP upsert): `FAKE_QDRANT_EMBEDDING_PROVIDER`, `FAKE_QDRANT_EMBEDDING_BASE_URL`, `FAKE_QDRANT_EMBEDDING_MODEL`, `FAKE_QDRANT_LOCAL_EMBEDDINGS_TARGET`
 
 Startup reads these through `loadConfig()` and passes `dataDir` / HTTP bind into the store and shim.
@@ -192,6 +207,7 @@ Startup reads these through `loadConfig()` and passes `dataDir` / HTTP bind into
 ### Constraints
 - Partial Qdrant compatibility; local development only
 - Cosine only
+- Named/sparse vectors, prefetch/fusion, recommend/discover, snapshots, and aliases are not implemented
 - No native DB binaries
 - No built-in ingest/chunking
 - No auth or multi-tenant isolation
@@ -261,9 +277,9 @@ node scripts/mcp-launch.mjs fake-qdrant
 - Auth / multi-user tenancy
 - Built-in embedding or document ingest
 - Production APM, metrics, or remote log shipping
+- Named/sparse vectors, prefetch/fusion, recommend/discover, snapshots, aliases
 
 ## Future Considerations
 
-- Richer query filters
 - Import/export of collection directories
 - Optional first-class embed-then-upsert tool (still not required for storage)

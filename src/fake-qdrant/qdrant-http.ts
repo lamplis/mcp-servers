@@ -1,10 +1,16 @@
 import crypto from "node:crypto";
 import http from "node:http";
 import { URL } from "node:url";
-import { CollectionSizeMismatchError, Store } from "./store.js";
+import {
+  CollectionExistsError,
+  CollectionSizeMismatchError,
+  PointNotFoundError,
+  Store,
+  type QueryHit,
+} from "./store.js";
 import { toLogger, type Logger } from "./logger.js";
 import { ProcessLockBusyError } from "./disk-gate.js";
-import { matchFilter } from "./qdrant-filter.js";
+import { matchFilter, UnsupportedFilterError } from "./qdrant-filter.js";
 import {
   countPayloadHygiene,
   isWhitespaceOnlyPayload,
@@ -22,6 +28,7 @@ export interface QdrantHttpServerOptions {
   };
   slowRequestMs?: number;
   flagPayloadPatterns?: string[];
+  strictCreate?: boolean;
 }
 
 interface HttpRequestLog {
@@ -92,7 +99,8 @@ export async function startQdrantHttpServer(
         logger,
         deleteDedup,
         recentlyDeleted,
-        identity
+        identity,
+        options.strictCreate === true
       );
     } catch (error) {
       if (error instanceof ProcessLockBusyError) {
@@ -109,6 +117,30 @@ export async function startQdrantHttpServer(
               message: error.message,
             },
           },
+          requestLog
+        );
+      } else if (
+        error instanceof UnsupportedFilterError ||
+        error instanceof UnsupportedQueryError
+      ) {
+        sendJson(
+          res,
+          400,
+          { status: { error: error.message } },
+          requestLog
+        );
+      } else if (error instanceof CollectionExistsError) {
+        sendJson(
+          res,
+          409,
+          { status: { error: error.message } },
+          requestLog
+        );
+      } else if (error instanceof PointNotFoundError) {
+        sendJson(
+          res,
+          404,
+          { status: { error: error.message } },
           requestLog
         );
       } else {
@@ -314,6 +346,271 @@ function pruneDedup(map: Map<string, number>, now: number): void {
   }
 }
 
+const UNSUPPORTED_QUERY_BODY_FIELDS = [
+  "prefetch",
+  "using",
+  "params",
+  "lookup_from",
+  "shard_key",
+] as const;
+
+const UNSUPPORTED_QUERY_OBJECT_FIELDS = [
+  "fusion",
+  "recommend",
+  "discover",
+  "sample",
+  "formula",
+] as const;
+
+export class UnsupportedQueryError extends Error {
+  constructor(field: string) {
+    super(`Unsupported query: ${field}`);
+    this.name = "UnsupportedQueryError";
+  }
+}
+
+export type WithPayloadSpec =
+  | { mode: "none" }
+  | { mode: "all" }
+  | { mode: "include"; keys: string[] }
+  | { mode: "exclude"; keys: string[] };
+
+export interface ParsedQueryRequest {
+  kind: "vector" | "id" | "list";
+  vector?: number[];
+  id?: string | number;
+  limit: number;
+  offset: number;
+  scoreThreshold?: number;
+  filter?: unknown;
+  withPayload: WithPayloadSpec;
+  withVector: boolean;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value != null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isNumericArray(value: unknown): value is number[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "number");
+}
+
+function parseWithPayload(raw: unknown, defaultAll = false): WithPayloadSpec {
+  if (raw === undefined || raw === null) {
+    return defaultAll ? { mode: "all" } : { mode: "none" };
+  }
+  if (raw === true) {
+    return { mode: "all" };
+  }
+  if (raw === false) {
+    return { mode: "none" };
+  }
+  if (Array.isArray(raw) && raw.every((item) => typeof item === "string")) {
+    return { mode: "include", keys: raw };
+  }
+  if (isRecord(raw)) {
+    if (Array.isArray(raw.include)) {
+      return {
+        mode: "include",
+        keys: raw.include.filter((item): item is string => typeof item === "string"),
+      };
+    }
+    if (Array.isArray(raw.exclude)) {
+      return {
+        mode: "exclude",
+        keys: raw.exclude.filter((item): item is string => typeof item === "string"),
+      };
+    }
+  }
+  return defaultAll ? { mode: "all" } : { mode: "none" };
+}
+
+function projectPayload(payload: unknown, spec: WithPayloadSpec): unknown {
+  if (spec.mode === "none") {
+    return undefined;
+  }
+  if (spec.mode === "all") {
+    return payload ?? null;
+  }
+  if (!isRecord(payload)) {
+    return spec.mode === "include" ? {} : payload ?? null;
+  }
+  if (spec.mode === "include") {
+    const out: Record<string, unknown> = {};
+    for (const key of spec.keys) {
+      if (key in payload) {
+        out[key] = payload[key];
+      }
+    }
+    return out;
+  }
+  const out = { ...payload };
+  for (const key of spec.keys) {
+    delete out[key];
+  }
+  return out;
+}
+
+function shapeScoredPoint(
+  hit: QueryHit,
+  spec: WithPayloadSpec,
+  withVector: boolean
+): Record<string, unknown> {
+  const point: Record<string, unknown> = {
+    id: hit.id,
+    version: hit.version ?? 0,
+    score: hit.score,
+  };
+  if (spec.mode !== "none") {
+    point.payload = projectPayload(hit.payload, spec);
+  }
+  if (withVector) {
+    point.vector = hit.vector ?? null;
+  }
+  return point;
+}
+
+function finiteNumber(value: unknown, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+export function parseQueryRequest(
+  body: unknown,
+  options: { requireVector?: boolean } = {}
+): ParsedQueryRequest {
+  const record = isRecord(body) ? body : {};
+  for (const field of UNSUPPORTED_QUERY_BODY_FIELDS) {
+    if (record[field] !== undefined) {
+      throw new UnsupportedQueryError(field);
+    }
+  }
+  if (isRecord(record.query)) {
+    for (const field of UNSUPPORTED_QUERY_OBJECT_FIELDS) {
+      if (record.query[field] !== undefined) {
+        throw new UnsupportedQueryError(field);
+      }
+    }
+  } else if (record.query !== undefined && !Array.isArray(record.query) && typeof record.query !== "number" && typeof record.query !== "string") {
+    throw new UnsupportedQueryError("query");
+  }
+
+  if (isRecord(record.vector) && !Array.isArray(record.vector)) {
+    throw new UnsupportedQueryError("using");
+  }
+
+  let kind: ParsedQueryRequest["kind"] = "list";
+  let vector: number[] | undefined;
+  let id: string | number | undefined;
+  const query = record.query;
+
+  if (isNumericArray(query)) {
+    kind = "vector";
+    vector = query;
+  } else if (typeof query === "number" || typeof query === "string") {
+    kind = "id";
+    id = query;
+  } else if (isRecord(query)) {
+    if (query.nearest !== undefined) {
+      if (isNumericArray(query.nearest)) {
+        kind = "vector";
+        vector = query.nearest;
+      } else if (typeof query.nearest === "number" || typeof query.nearest === "string") {
+        kind = "id";
+        id = query.nearest;
+      } else if (isRecord(query.nearest) && isNumericArray(query.nearest.vector)) {
+        kind = "vector";
+        vector = query.nearest.vector;
+      }
+    } else if (isNumericArray(query.vector)) {
+      kind = "vector";
+      vector = query.vector;
+    }
+  }
+
+  if (kind === "list") {
+    if (isNumericArray(record.vector)) {
+      kind = "vector";
+      vector = record.vector;
+    } else if (isNumericArray(record.query_vector)) {
+      kind = "vector";
+      vector = record.query_vector;
+    }
+  }
+
+  if (options.requireVector && kind !== "vector") {
+    throw new Error("missing query vector");
+  }
+
+  const rawThreshold = record.score_threshold ?? (isRecord(query) ? query.score_threshold : undefined);
+  const parsedThreshold =
+    rawThreshold === undefined || rawThreshold === null ? undefined : Number(rawThreshold);
+
+  return {
+    kind,
+    vector,
+    id,
+    limit: Math.max(1, finiteNumber(record.limit ?? record.top, 10)),
+    offset: Math.max(0, finiteNumber(record.offset, 0)),
+    scoreThreshold: parsedThreshold !== undefined && Number.isFinite(parsedThreshold) ? parsedThreshold : undefined,
+    filter: record.filter,
+    withPayload: parseWithPayload(record.with_payload, false),
+    withVector: record.with_vector === true,
+  };
+}
+
+async function runParsedQuery(
+  store: Store,
+  collectionName: string,
+  parsed: ParsedQueryRequest
+): Promise<QueryHit[]> {
+  const options = {
+    limit: parsed.limit,
+    offset: parsed.offset,
+    scoreThreshold: parsed.scoreThreshold,
+    filter: parsed.filter,
+    withVector: parsed.withVector,
+  };
+  if (parsed.kind === "list") {
+    return store.listByIds(collectionName, options);
+  }
+  if (parsed.kind === "id") {
+    if (parsed.id === undefined) {
+      throw new Error("missing query vector");
+    }
+    return store.query(collectionName, { id: parsed.id }, options);
+  }
+  if (!parsed.vector) {
+    throw new Error("missing query vector");
+  }
+  return store.query(collectionName, parsed.vector, options);
+}
+
+function payloadOpResult(operationId: number): Record<string, unknown> {
+  return {
+    result: { operation_id: operationId, status: "completed" },
+    status: "ok",
+    time: 0,
+  };
+}
+
+function parsePointSelector(body: Record<string, unknown> | undefined): {
+  ids?: (string | number)[];
+  filter?: unknown;
+  key?: string;
+} {
+  const ids = Array.isArray(body?.points)
+    ? (body.points as unknown[]).filter(
+        (item): item is string | number => typeof item === "string" || typeof item === "number"
+      )
+    : undefined;
+  return {
+    ids: ids && ids.length > 0 ? ids : undefined,
+    filter: body?.filter,
+    key: typeof body?.key === "string" ? body.key : undefined,
+  };
+}
+
 async function handleRequest(
   req: http.IncomingMessage,
   res: http.ServerResponse,
@@ -327,7 +624,8 @@ async function handleRequest(
       instanceId: string;
       startedAt: string;
       dataDir?: string;
-    }
+    },
+    strictCreate: boolean
   ) {
   const json = (status: number, payload: unknown) =>
     sendJson(res, status, payload, requestLog);
@@ -400,20 +698,24 @@ async function handleRequest(
   const collectionName = decodeURIComponent(match[1]);
   const remainder = match[2] ?? "";
 
-  if (req.method === "GET" && remainder === "") {
+  if (isRead(req.method) && remainder === "/exists") {
     const collection = await store.getCollection(collectionName);
+    return json(200, {
+      result: { exists: Boolean(collection) },
+      status: "ok",
+      time: 0,
+    });
+  }
+
+  if (req.method === "GET" && remainder === "") {
+    const collection = await store.getCollectionInfoQdrant(collectionName);
     if (!collection) {
       return json(404, {
         status: { error: "collection not found" },
       });
     }
     return json(200, {
-      result: {
-        ...collection,
-        points_count: collection.pointsCount,
-        indexed_vectors_count: collection.pointsCount,
-        status: "green",
-      },
+      result: collection,
       status: "ok",
       time: 0,
     });
@@ -445,11 +747,11 @@ async function handleRequest(
         });
         recentlyDeleted.delete(collectionName);
       }
-      await store.ensureCollection(collectionName, { size, distance });
+      await store.ensureCollection(collectionName, { size, distance, strict: strictCreate });
       return json(200, { result: true, status: "ok", time: 0 });
     } catch (error) {
       rethrowIfBusy(error);
-      if (error instanceof CollectionSizeMismatchError) {
+      if (error instanceof CollectionSizeMismatchError || error instanceof CollectionExistsError) {
         return json(409, {
           status: { error: error.message },
         });
@@ -556,34 +858,81 @@ async function handleRequest(
     }
   }
 
+  if (req.method === "POST" && remainder === "/points/query/batch") {
+    const body = requestLog.reqBody as { searches?: unknown[] } | undefined;
+    const searches = Array.isArray(body?.searches) ? body.searches : null;
+    if (!searches) {
+      return json(400, { status: { error: "missing searches[]" } });
+    }
+    try {
+      const result = [];
+      for (const item of searches) {
+        const parsed = parseQueryRequest(item);
+        const hits = await runParsedQuery(store, collectionName, parsed);
+        result.push({
+          points: hits.map((hit) =>
+            shapeScoredPoint(hit, parsed.withPayload, parsed.withVector)
+          ),
+        });
+      }
+      return json(200, { result, status: "ok", time: 0 });
+    } catch (error) {
+      return queryHttpError(error, json);
+    }
+  }
+
+  if (req.method === "POST" && remainder === "/points/search/batch") {
+    const body = requestLog.reqBody as { searches?: unknown[] } | undefined;
+    const searches = Array.isArray(body?.searches) ? body.searches : null;
+    if (!searches) {
+      return json(400, { status: { error: "missing searches[]" } });
+    }
+    try {
+      const result = [];
+      for (const item of searches) {
+        const parsed = parseQueryRequest(item, { requireVector: true });
+        const hits = await runParsedQuery(store, collectionName, parsed);
+        result.push(hits.map((hit) => shapeScoredPoint(hit, parsed.withPayload, parsed.withVector)));
+      }
+      return json(200, { result, status: "ok", time: 0 });
+    } catch (error) {
+      return queryHttpError(error, json);
+    }
+  }
+
   if (req.method === "POST" && remainder === "/points/query") {
     const body = requestLog.reqBody as any;
-    const vector =
-      body?.query?.vector ??
-      body?.vector ??
-      body?.query_vector ??
-      body?.query?.nearest?.vector;
-    const limit = Number(body?.limit ?? body?.top ?? 20);
-    const scoreThreshold = Number(
-      body?.score_threshold ?? body?.query?.score_threshold ?? 0
-    );
-
-    if (!Array.isArray(vector)) {
-      return json(400, { status: { error: "missing query vector" } });
-    }
-
     try {
-      const points = await store.query(collectionName, vector, {
-        limit: Number.isFinite(limit) ? limit : 20,
-        scoreThreshold: Number.isFinite(scoreThreshold) ? scoreThreshold : 0,
-        filter: body?.filter,
+      const parsed = parseQueryRequest(body);
+      const hits = await runParsedQuery(store, collectionName, parsed);
+      return json(200, {
+        result: {
+          points: hits.map((hit) =>
+            shapeScoredPoint(hit, parsed.withPayload, parsed.withVector)
+          ),
+        },
+        status: "ok",
+        time: 0,
       });
-      return json(200, { result: { points }, status: "ok", time: 0 });
     } catch (error) {
-      rethrowIfBusy(error);
-      return json(400, {
-        status: { error: error instanceof Error ? error.message : String(error) },
+      return queryHttpError(error, json);
+    }
+  }
+
+  if (req.method === "POST" && remainder === "/points/search") {
+    const body = requestLog.reqBody as any;
+    try {
+      const parsed = parseQueryRequest(body, { requireVector: true });
+      const hits = await runParsedQuery(store, collectionName, parsed);
+      return json(200, {
+        result: hits.map((hit) =>
+          shapeScoredPoint(hit, parsed.withPayload, parsed.withVector)
+        ),
+        status: "ok",
+        time: 0,
       });
+    } catch (error) {
+      return queryHttpError(error, json);
     }
   }
 
@@ -629,6 +978,64 @@ async function handleRequest(
     }
   }
 
+  if (req.method === "POST" && remainder === "/points/payload/delete") {
+    const body = (requestLog.reqBody ?? {}) as Record<string, unknown>;
+    const keys = Array.isArray(body.keys) ? body.keys : null;
+    if (!keys) {
+      return json(400, { status: { error: "missing keys[]" } });
+    }
+    const selector = parsePointSelector(body);
+    if (!selector.ids && selector.filter === undefined) {
+      return json(400, { status: { error: "missing points[] or filter" } });
+    }
+    try {
+      const result = await store.updatePayload(collectionName, selector, "delete", keys);
+      return json(200, payloadOpResult(result.operationId));
+    } catch (error) {
+      return queryHttpError(error, json);
+    }
+  }
+
+  if (req.method === "POST" && remainder === "/points/payload/clear") {
+    const body = (requestLog.reqBody ?? {}) as Record<string, unknown>;
+    const selector = parsePointSelector(body);
+    if (!selector.ids && selector.filter === undefined) {
+      return json(400, { status: { error: "missing points[] or filter" } });
+    }
+    try {
+      const result = await store.updatePayload(collectionName, selector, "clear");
+      return json(200, payloadOpResult(result.operationId));
+    } catch (error) {
+      return queryHttpError(error, json);
+    }
+  }
+
+  if (
+    (req.method === "POST" || req.method === "PUT") &&
+    remainder === "/points/payload"
+  ) {
+    const body = (requestLog.reqBody ?? {}) as Record<string, unknown>;
+    if (!isRecord(body.payload) && req.method === "POST" && typeof body.key !== "string") {
+      return json(400, { status: { error: "missing payload" } });
+    }
+    const selector = parsePointSelector(body);
+    if (!selector.ids && selector.filter === undefined) {
+      return json(400, { status: { error: "missing points[] or filter" } });
+    }
+    try {
+      const mode = req.method === "PUT" ? "overwrite" : "set";
+      const result = await store.updatePayload(
+        collectionName,
+        selector,
+        mode,
+        body.payload
+      );
+      return json(200, payloadOpResult(result.operationId));
+    } catch (error) {
+      return queryHttpError(error, json);
+    }
+  }
+
   if (req.method === "POST" && remainder === "/points/delete") {
     const body = requestLog.reqBody as any;
     const pointIds = body?.points;
@@ -668,7 +1075,7 @@ async function handleRequest(
         deletedCount = await store.deletePoints(
           collectionName,
           undefined,
-          (payload) => matchFilter(payload, filter),
+          (payload, id) => matchFilter(payload, filter, id),
           filter
         );
       } else {
@@ -689,10 +1096,7 @@ async function handleRequest(
         time: 0,
       });
     } catch (error) {
-      rethrowIfBusy(error);
-      return json(400, {
-        status: { error: error instanceof Error ? error.message : String(error) },
-      });
+      return queryHttpError(error, json);
     }
   }
 
@@ -719,6 +1123,31 @@ async function handleRequest(
     rawUrl: req.url ?? "",
     sidecar: FAKE_QDRANT_SIDECAR,
   });
+}
+
+function queryHttpError(
+  error: unknown,
+  json: (status: number, payload: unknown) => void
+): void {
+  rethrowIfBusy(error);
+  if (error instanceof UnsupportedFilterError || error instanceof UnsupportedQueryError) {
+    json(400, { status: { error: error.message } });
+    return;
+  }
+  if (error instanceof CollectionExistsError || error instanceof CollectionSizeMismatchError) {
+    json(409, { status: { error: error.message } });
+    return;
+  }
+  if (error instanceof PointNotFoundError) {
+    json(404, { status: { error: error.message } });
+    return;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  if (message === "missing query vector") {
+    json(400, { status: { error: "missing query vector" } });
+    return;
+  }
+  json(400, { status: { error: message } });
 }
 
 function rethrowIfBusy(error: unknown): void {

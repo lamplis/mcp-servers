@@ -419,16 +419,14 @@ describe('Fake Qdrant HTTP API Integration Tests', () => {
       }
     });
 
-    it('should reject query without vector', async () => {
+    it('should list points by id when query is omitted', async () => {
       const response = await httpRequest('POST', '/collections/test-collection/points/query', {
         limit: 10,
       });
-      expect(response.status).toBe(400);
-      expect(response.data).toMatchObject({
-        status: {
-          error: 'missing query vector',
-        },
-      });
+      expect(response.status).toBe(200);
+      const hits = queryHits(response.data);
+      expect(hits.map((hit) => hit.id)).toEqual([1, 2, 3]);
+      expect(hits.every((hit) => hit.score === 0)).toBe(true);
     });
 
     it('should return empty results for empty collection', async () => {
@@ -441,6 +439,201 @@ describe('Fake Qdrant HTTP API Integration Tests', () => {
       });
       expect(response.status).toBe(200);
       expect(queryHits(response.data)).toEqual([]);
+    });
+  });
+
+  describe('Query API fidelity', () => {
+    beforeEach(async () => {
+      await httpRequest('PUT', '/collections/test-collection', {
+        vectors: { size: 3, distance: 'Cosine' },
+      });
+      await httpRequest('PUT', '/collections/test-collection/points', {
+        points: [
+          { id: 1, vector: [1, 0, 0], payload: { name: 'point1', tag: 'a' } },
+          { id: 2, vector: [0, 1, 0], payload: { name: 'point2', tag: 'b' } },
+          { id: 3, vector: [0, 0, 1], payload: { name: 'point3', tag: 'c' } },
+        ],
+      });
+    });
+
+    it('accepts canonical query as a raw vector array', async () => {
+      const response = await httpRequest('POST', '/collections/test-collection/points/query', {
+        query: [1, 0, 0],
+        limit: 1,
+      });
+      expect(response.status).toBe(200);
+      expect(queryHits(response.data)[0].id).toBe(1);
+      expect(queryHits(response.data)[0]).toHaveProperty('version');
+      expect(queryHits(response.data)[0].payload).toBeUndefined();
+    });
+
+    it('accepts query.nearest as a vector', async () => {
+      const response = await httpRequest('POST', '/collections/test-collection/points/query', {
+        query: { nearest: [1, 0, 0] },
+        limit: 1,
+      });
+      expect(response.status).toBe(200);
+      expect(queryHits(response.data)[0].id).toBe(1);
+    });
+
+    it('queries nearest-by-id and excludes the origin point', async () => {
+      const response = await httpRequest('POST', '/collections/test-collection/points/query', {
+        query: { nearest: 1 },
+        limit: 10,
+      });
+      expect(response.status).toBe(200);
+      const ids = queryHits(response.data).map((hit) => hit.id);
+      expect(ids).not.toContain(1);
+      expect(ids.length).toBeGreaterThan(0);
+    });
+
+    it('applies offset after scoring', async () => {
+      const response = await httpRequest('POST', '/collections/test-collection/points/query', {
+        query: [1, 0, 0],
+        limit: 10,
+        offset: 1,
+      });
+      expect(response.status).toBe(200);
+      const ids = queryHits(response.data).map((hit) => hit.id);
+      expect(ids).not.toContain(1);
+    });
+
+    it('projects payload include lists and optional vectors', async () => {
+      const response = await httpRequest('POST', '/collections/test-collection/points/query', {
+        query: [1, 0, 0],
+        limit: 1,
+        with_payload: ['name'],
+        with_vector: true,
+      });
+      expect(response.status).toBe(200);
+      const hit = queryHits(response.data)[0];
+      expect(hit.payload).toEqual({ name: 'point1' });
+      expect(hit.vector).toEqual([1, 0, 0]);
+    });
+
+    it('returns negative cosine scores when score_threshold is omitted', async () => {
+      const response = await httpRequest('POST', '/collections/test-collection/points/query', {
+        query: [-1, 0, 0],
+        limit: 10,
+      });
+      expect(response.status).toBe(200);
+      const hits = queryHits(response.data);
+      const opposite = hits.find((hit) => hit.id === 1);
+      expect(opposite).toBeDefined();
+      expect(opposite?.score).toBeLessThan(0);
+    });
+
+    it('returns a flat result from /points/search', async () => {
+      const response = await httpRequest('POST', '/collections/test-collection/points/search', {
+        vector: [1, 0, 0],
+        limit: 1,
+      });
+      expect(response.status).toBe(200);
+      expect(Array.isArray(response.data.result)).toBe(true);
+      expect(response.data.result[0].id).toBe(1);
+    });
+
+    it('runs query and search batch endpoints', async () => {
+      const queryBatch = await httpRequest('POST', '/collections/test-collection/points/query/batch', {
+        searches: [{ query: [1, 0, 0], limit: 1 }, { query: [0, 1, 0], limit: 1 }],
+      });
+      expect(queryBatch.status).toBe(200);
+      expect(queryBatch.data.result).toHaveLength(2);
+      expect(queryBatch.data.result[0].points[0].id).toBe(1);
+      expect(queryBatch.data.result[1].points[0].id).toBe(2);
+
+      const searchBatch = await httpRequest('POST', '/collections/test-collection/points/search/batch', {
+        searches: [{ vector: [1, 0, 0], limit: 1 }],
+      });
+      expect(searchBatch.status).toBe(200);
+      expect(searchBatch.data.result[0][0].id).toBe(1);
+    });
+
+    it('mutates payloads with set, overwrite, delete, and clear', async () => {
+      const setRes = await httpRequest('POST', '/collections/test-collection/points/payload', {
+        payload: { extra: true },
+        points: [1],
+      });
+      expect(setRes.status).toBe(200);
+      expect(setRes.data.result.status).toBe('completed');
+
+      const retrieved = await httpRequest('POST', '/collections/test-collection/points', {
+        ids: [1],
+      });
+      expect(retrieved.data.result.points[0].payload).toMatchObject({
+        name: 'point1',
+        extra: true,
+      });
+
+      const overwrite = await httpRequest('PUT', '/collections/test-collection/points/payload', {
+        payload: { only: 'x' },
+        points: [1],
+      });
+      expect(overwrite.status).toBe(200);
+      const afterOverwrite = await httpRequest('POST', '/collections/test-collection/points', {
+        ids: [1],
+      });
+      expect(retrieved.data.result.points[0].payload).toBeDefined();
+      expect(afterOverwrite.data.result.points[0].payload).toEqual({ only: 'x' });
+
+      const deleted = await httpRequest('POST', '/collections/test-collection/points/payload/delete', {
+        keys: ['only'],
+        points: [1],
+      });
+      expect(deleted.status).toBe(200);
+      const afterDelete = await httpRequest('POST', '/collections/test-collection/points', {
+        ids: [1],
+      });
+      expect(afterDelete.data.result.points[0].payload).toEqual({});
+
+      const cleared = await httpRequest('POST', '/collections/test-collection/points/payload/clear', {
+        points: [2],
+      });
+      expect(cleared.status).toBe(200);
+      const afterClear = await httpRequest('POST', '/collections/test-collection/points', {
+        ids: [2],
+      });
+      expect(afterClear.data.result.points[0].payload).toEqual({});
+    });
+
+    it('reports collection existence and Qdrant-shaped GET info', async () => {
+      const exists = await httpRequest('GET', '/collections/test-collection/exists');
+      expect(exists.status).toBe(200);
+      expect(exists.data.result.exists).toBe(true);
+      const missing = await httpRequest('GET', '/collections/nope/exists');
+      expect(missing.data.result.exists).toBe(false);
+
+      const info = await httpRequest('GET', '/collections/test-collection');
+      expect(info.status).toBe(200);
+      expect(info.data.result).toMatchObject({
+        name: 'test-collection',
+        status: 'green',
+        optimizer_status: 'ok',
+        points_count: 3,
+        segments_count: 1,
+        config: {
+          params: {
+            vectors: { size: 3, distance: 'Cosine' },
+          },
+        },
+      });
+      expect(info.data.result.pointsCount).toBe(3);
+    });
+
+    it('returns 400 for prefetch and unsupported filters', async () => {
+      const prefetch = await httpRequest('POST', '/collections/test-collection/points/query', {
+        query: [1, 0, 0],
+        prefetch: [{ query: [1, 0, 0] }],
+      });
+      expect(prefetch.status).toBe(400);
+      expect(prefetch.data.status.error).toMatch(/Unsupported query: prefetch/);
+
+      const filter = await httpRequest('POST', '/collections/test-collection/points/query', {
+        query: [1, 0, 0],
+        filter: { must: [{ key: 'name', match: { text: 'point1' } }] },
+      });
+      expect(filter.status).toBe(400);
+      expect(filter.data.status.error).toMatch(/Unsupported filter: match.text/);
     });
   });
 
@@ -894,6 +1087,77 @@ describe('Fake Qdrant HTTP API when the data dir is locked', () => {
     expect(created.data).toMatchObject({
       status: { error: 'service busy' },
     });
+  });
+});
+
+describe('strict collection create', () => {
+  let server: QdrantHttpServerHandle | null = null;
+  let store: Store | null = null;
+  let testDataDir: string;
+
+  afterEach(async () => {
+    if (server) {
+      await server.close();
+    }
+    if (store) {
+      await store.close();
+    }
+    if (testDataDir) {
+      await fs.rm(testDataDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  it('returns 409 when FAKE_QDRANT_STRICT_CREATE is enabled', async () => {
+    testDataDir = path.join(
+      resolveDataDir(),
+      `strict-${Date.now()}-${Math.random().toString(36).substring(7)}`
+    );
+    await fs.mkdir(testDataDir, { recursive: true });
+    store = await Store.create({ dataDir: testDataDir });
+    server = await startQdrantHttpServer({
+      store,
+      host: '127.0.0.1',
+      port: 0,
+      logger: () => {},
+      strictCreate: true,
+    });
+    const port = server.port;
+    const put = (name: string) =>
+      new Promise<{ status: number; data: any }>((resolve, reject) => {
+        const body = JSON.stringify({ vectors: { size: 2, distance: 'Cosine' } });
+        const req = http.request(
+          {
+            method: 'PUT',
+            hostname: '127.0.0.1',
+            port,
+            path: `/collections/${name}`,
+            headers: {
+              'Content-Type': 'application/json',
+              'Content-Length': Buffer.byteLength(body),
+            },
+          },
+          (res) => {
+            let data = '';
+            res.on('data', (chunk) => {
+              data += chunk.toString();
+            });
+            res.on('end', () => {
+              resolve({
+                status: res.statusCode || 500,
+                data: data ? JSON.parse(data) : {},
+              });
+            });
+          }
+        );
+        req.on('error', reject);
+        req.write(body);
+        req.end();
+      });
+    const first = await put('dup');
+    expect(first.status).toBe(200);
+    const second = await put('dup');
+    expect(second.status).toBe(409);
+    expect(second.data.status.error).toMatch(/already exists/);
   });
 });
 
