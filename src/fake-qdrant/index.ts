@@ -7,6 +7,7 @@ import {
   installShutdownHooks,
   lockDirForDataDir,
   parseTakeoverPolicy,
+  releaseIdentitySync,
   removeInstanceFile,
   resolveContention,
   resolvePortContention,
@@ -17,7 +18,12 @@ import { createServer } from "./server.js";
 import { startQdrantHttpServer, type QdrantHttpServerHandle } from "./qdrant-http.js";
 import { createFileLogger } from "./logger.js";
 import { DiskGate } from "./disk-gate.js";
-import { createProvider } from "./provider.js";
+import {
+  createProvider,
+  describeProxyState,
+  embeddingProbeLogFields,
+  OpenAICompatibleProvider,
+} from "./provider.js";
 
 async function main() {
   const config = loadConfig();
@@ -80,7 +86,14 @@ async function main() {
   try {
     embeddingProvider = createProvider(config);
     if (embeddingProvider) {
-      logger.info("embedding.provider", { ...embeddingProvider.describe() });
+      const proxy =
+        embeddingProvider instanceof OpenAICompatibleProvider
+          ? describeProxyState(new URL(embeddingProvider.endpoint))
+          : undefined;
+      logger.info("embedding.provider", {
+        ...embeddingProvider.describe(),
+        proxy,
+      });
     }
   } catch (error) {
     if (error instanceof ConfigError) {
@@ -105,6 +118,27 @@ async function main() {
   });
   const transport = new StdioServerTransport();
   await server.connect(transport);
+
+  if (embeddingProvider) {
+    void embeddingProvider
+      .probe()
+      .then((result) => {
+        const fields = embeddingProbeLogFields(result);
+        if (result.ok) {
+          logger.info("embedding.health", fields);
+        } else {
+          logger.error("embedding.health", fields);
+          const detail = [result.error, result.hint].filter(Boolean).join(" — ");
+          console.error(`embedding.health failed: ${detail}`);
+        }
+      })
+      .catch((error) => {
+        logger.error("embedding.health", {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+  }
 
   let httpHandle: QdrantHttpServerHandle | null = null;
 
@@ -175,6 +209,12 @@ async function main() {
       await logger.flush();
       logger.close();
     },
+    onExitSync: () =>
+      releaseIdentitySync({
+        lockDir,
+        dataDir,
+        pid: process.pid,
+      }),
   });
 }
 

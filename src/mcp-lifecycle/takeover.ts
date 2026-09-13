@@ -3,12 +3,12 @@ import {
   ProcessLockBusyError,
   acquireProcessLock,
   isPidAlive,
-  readLockHolderPid,
   sleep,
   type ProcessLock,
 } from "./disk-gate.js";
 import type { Logger } from "./logger.js";
 import { isNodeImage, isOurProcess, listProcessImage, type VerifyDeps } from "./verify.js";
+import { cleanStaleState } from "./clean.js";
 
 export type TakeoverPolicy = "takeover" | "fail-fast";
 
@@ -21,6 +21,18 @@ export class ContentionForeignError extends Error {
   constructor(message: string, holderPid?: number, port?: number) {
     super(message);
     this.name = "ContentionForeignError";
+    this.holderPid = holderPid;
+    this.port = port;
+  }
+}
+
+export class TakeoverFailedError extends Error {
+  readonly holderPid?: number;
+  readonly port?: number;
+
+  constructor(message: string, holderPid?: number, port?: number) {
+    super(message);
+    this.name = "TakeoverFailedError";
     this.holderPid = holderPid;
     this.port = port;
   }
@@ -89,11 +101,21 @@ export async function resolveContention(options: {
   const alive = deps.isAlive ?? isPidAlive;
   const kill = deps.kill ?? killProcess;
   const sleepFn = deps.sleepFn ?? sleep;
+  const ownPid = options.pid ?? process.pid;
+
+  await cleanStaleState({
+    dataDir: options.dataDir,
+    lockDir: options.lockDir,
+    role: options.role,
+    ownPid,
+    isAlive: alive,
+    logger: options.logger,
+  });
 
   try {
     return await acquireProcessLock({
       lockDir: options.lockDir,
-      pid: options.pid,
+      pid: ownPid,
       isAlive: alive,
       retries: 4,
       retryMs: 25,
@@ -114,6 +136,7 @@ export async function resolveContention(options: {
         isAlive: alive,
         listImage: deps.listImage,
         fetchHealth: deps.fetchHealth,
+        commandLine: deps.commandLine,
       }));
     if (!ours) {
       options.logger?.error("lifecycle.contention_foreign", {
@@ -150,22 +173,55 @@ export async function resolveContention(options: {
     if (holderPid != null) {
       kill(holderPid);
     }
-    await waitUntil(
-      async () => {
-        const stillAlive = holderPid != null && alive(holderPid);
-        const remaining = await readLockHolderPid(options.lockDir);
-        return !stillAlive && (remaining === undefined || remaining === options.pid);
-      },
+    const dead = await waitUntil(
+      () => holderPid == null || !alive(holderPid),
       waitMs,
       sleepFn
     );
-    return acquireProcessLock({
+    if (!dead) {
+      const image =
+        holderPid != null
+          ? await (deps.listImage ?? listProcessImage)(holderPid)
+          : undefined;
+      options.logger?.error("lifecycle.takeover_failed", {
+        holderPid,
+        image,
+        lockDir: options.lockDir,
+        waitedMs: waitMs,
+        role: options.role,
+      });
+      throw new TakeoverFailedError(
+        `Takeover failed: process ${holderPid ?? "unknown"} is still alive after ${waitMs}ms. ${takeoverKillCommand(options.role)}`,
+        holderPid,
+        options.port
+      );
+    }
+    await cleanStaleState({
+      dataDir: options.dataDir,
       lockDir: options.lockDir,
-      pid: options.pid,
+      role: options.role,
+      ownPid,
       isAlive: alive,
-      retries: 20,
-      retryMs: 50,
+      logger: options.logger,
     });
+    try {
+      return await acquireProcessLock({
+        lockDir: options.lockDir,
+        pid: ownPid,
+        isAlive: alive,
+        retries: 20,
+        retryMs: 50,
+      });
+    } catch (acquireError) {
+      if (acquireError instanceof ProcessLockBusyError) {
+        throw new TakeoverFailedError(
+          `Takeover failed: lock still held by ${acquireError.holderPid ?? "unknown"} after kill. ${takeoverKillCommand(options.role)}`,
+          acquireError.holderPid,
+          options.port
+        );
+      }
+      throw acquireError;
+    }
   }
 }
 
@@ -242,23 +298,41 @@ export async function resolvePortContention(options: {
   if (holderPid != null) {
     kill(holderPid);
   }
-  await waitUntil(
+  const freed = await waitUntil(
     () => portFree(options.host, options.port),
     waitMs,
     sleepFn
   );
+  if (!freed) {
+    options.logger?.error("lifecycle.takeover_failed", {
+      holderPid,
+      image,
+      port: options.port,
+      waitedMs: waitMs,
+      role: options.role,
+    });
+    throw new TakeoverFailedError(
+      `Takeover failed: port ${options.port} still held by process ${holderPid ?? "unknown"} after ${waitMs}ms. ${takeoverKillCommand(options.role)}`,
+      holderPid,
+      options.port
+    );
+  }
 }
 
-async function waitUntil(
+export async function waitUntil(
   predicate: () => boolean | Promise<boolean>,
   waitMs: number,
   sleepFn: (ms: number) => Promise<void>
-): Promise<void> {
+): Promise<boolean> {
   const deadline = Date.now() + waitMs;
-  while (Date.now() < deadline) {
+  do {
     if (await predicate()) {
-      return;
+      return true;
+    }
+    if (Date.now() >= deadline) {
+      break;
     }
     await sleepFn(50);
-  }
+  } while (Date.now() < deadline);
+  return predicate();
 }

@@ -4,7 +4,10 @@ import type { DiskGate } from "./disk-gate.js";
 import { Store, type PointRecord } from "./store.js";
 import { matchFilter } from "./qdrant-filter.js";
 import type { EmbeddingProvider } from "./provider.js";
-import { EMBEDDING_NOT_CONFIGURED } from "./provider.js";
+import {
+  EMBEDDING_NOT_CONFIGURED,
+  embeddingHealthPayload,
+} from "./provider.js";
 import type { Logger } from "./logger.js";
 import type { InstanceInfo } from "@modelcontextprotocol/mcp-lifecycle";
 import type { ProcessLock } from "./disk-gate.js";
@@ -117,7 +120,7 @@ function registerTools(
     {
       title: "Fake Qdrant process status",
       description:
-        "Identity, lock holder, HTTP bind state, and log file path for this process.",
+        "Identity, lock holder, HTTP bind state, log file, and a live embedding-API probe.",
       inputSchema: {},
       outputSchema: {
         pid: z.number(),
@@ -130,19 +133,44 @@ function registerTools(
         lockDir: z.string().optional(),
         busy: z.boolean(),
         dataDir: z.string(),
-        embedding: z
-          .object({
-            mode: z.string(),
-            model: z.string(),
-            baseUrlHost: z.string(),
-            dim: z.number().nullable(),
-          })
-          .nullable(),
+        embedding: z.object({
+          configured: z.boolean(),
+          ok: z.boolean().nullable(),
+          mode: z.string().optional(),
+          model: z.string().optional(),
+          baseUrlHost: z.string().optional(),
+          dim: z.number().nullable().optional(),
+          ms: z.number().optional(),
+          endpointHost: z.string().optional(),
+          statusCode: z.number().optional(),
+          error: z.string().optional(),
+          code: z.string().optional(),
+          hint: z.string().optional(),
+          message: z.string().optional(),
+          proxy: z
+            .object({
+              envSet: z.boolean(),
+              used: z.boolean(),
+              host: z.string().nullable(),
+              loopback: z.boolean(),
+            })
+            .optional(),
+        }),
       },
     },
     async () =>
       runLoggedTool(logger, "fake_qdrant_status", async () => {
         const identity = runtimeStatus?.identity;
+        let embedding: Record<string, unknown>;
+        if (!embeddingProvider) {
+          embedding = embeddingHealthPayload(null);
+        } else {
+          const probe = await embeddingProvider.probe();
+          embedding = {
+            ...embeddingProvider.describe(),
+            ...probe,
+          };
+        }
         const payload = {
           pid: identity?.pid ?? process.pid,
           role: identity?.role,
@@ -154,7 +182,7 @@ function registerTools(
           lockDir: runtimeStatus?.lockDir,
           busy: store.isBusy,
           dataDir: store.directory,
-          embedding: embeddingProvider ? embeddingProvider.describe() : null,
+          embedding,
         };
         return {
           content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }],

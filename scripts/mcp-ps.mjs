@@ -5,6 +5,7 @@
  *   node scripts/mcp-ps.mjs list
  *   node scripts/mcp-ps.mjs kill <role>|all
  *   node scripts/mcp-ps.mjs doctor
+ *   node scripts/mcp-ps.mjs clean [role]|all
  */
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -139,6 +140,53 @@ function fetchHealthz(port) {
   });
 }
 
+function leftoverTmp(dir) {
+  const hits = [];
+  if (!fs.existsSync(dir)) {
+    return hits;
+  }
+  let entries = [];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return hits;
+  }
+  for (const entry of entries) {
+    if (entry.name === "logs") {
+      continue;
+    }
+    const full = path.join(dir, entry.name);
+    if (entry.isFile() && entry.name.endsWith(".tmp")) {
+      hits.push(full);
+    } else if (entry.isDirectory() && entry.name === "collections") {
+      let cols = [];
+      try {
+        cols = fs.readdirSync(full, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const col of cols) {
+        if (!col.isDirectory()) {
+          continue;
+        }
+        const colDir = path.join(full, col.name);
+        let files = [];
+        try {
+          files = fs.readdirSync(colDir, { withFileTypes: true });
+        } catch {
+          continue;
+        }
+        for (const file of files) {
+          if (file.isFile() && file.name.endsWith(".tmp")) {
+            hits.push(path.join(colDir, file.name));
+          }
+        }
+      }
+    }
+  }
+  return hits;
+}
+
 function leftoverDb(dir) {
   const hits = [];
   if (!fs.existsSync(dir)) {
@@ -181,6 +229,7 @@ async function describeRole(spec) {
     portOwner: listening,
     health,
     leftoverDb: leftoverDb(spec.dataDir),
+    leftoverTmp: leftoverTmp(spec.dataDir),
   };
 }
 
@@ -216,8 +265,42 @@ async function doctor(rows) {
   }
   if (issues === 0) {
     console.log("doctor: no stale locks or instance files.");
+  } else {
+    console.log("Run: node scripts/mcp-ps.mjs clean all");
   }
   return issues;
+}
+
+function cleanRole(spec, row) {
+  const liveLock = row.lockPid && row.lockAlive;
+  const liveInstance = row.instance?.pid && row.instanceAlive;
+  if (liveLock || liveInstance) {
+    console.error(
+      `${spec.role}: refusing to clean; pid ${row.lockPid ?? row.instance?.pid} is alive. Use kill first.`
+    );
+    return false;
+  }
+  let removed = 0;
+  if (fs.existsSync(spec.lockDir)) {
+    fs.rmSync(spec.lockDir, { recursive: true, force: true });
+    console.log(`${spec.role}: removed lock ${spec.lockDir}`);
+    removed += 1;
+  }
+  const instancePath = path.join(spec.dataDir, "instance.json");
+  if (fs.existsSync(instancePath)) {
+    fs.rmSync(instancePath, { force: true });
+    console.log(`${spec.role}: removed ${instancePath}`);
+    removed += 1;
+  }
+  for (const tmp of leftoverTmp(spec.dataDir)) {
+    fs.rmSync(tmp, { force: true });
+    console.log(`${spec.role}: removed ${tmp}`);
+    removed += 1;
+  }
+  if (removed === 0) {
+    console.log(`${spec.role}: nothing to clean`);
+  }
+  return true;
 }
 
 function killPid(pid) {
@@ -285,7 +368,22 @@ if (command === "list") {
     }
     await killRole(spec, row);
   }
+} else if (command === "clean") {
+  const wanted = target === "all" || !target ? ROLES.map((item) => item.role) : [target];
+  let refused = false;
+  for (const role of wanted) {
+    const spec = ROLES.find((item) => item.role === role);
+    const row = rows.find((item) => item.role === role);
+    if (!spec || !row) {
+      console.error(`Unknown role ${role}`);
+      process.exit(1);
+    }
+    if (!cleanRole(spec, row)) {
+      refused = true;
+    }
+  }
+  process.exit(refused ? 1 : 0);
 } else {
-  console.error("Usage: node scripts/mcp-ps.mjs list|kill|doctor");
+  console.error("Usage: node scripts/mcp-ps.mjs list|kill|doctor|clean [role|all]");
   process.exit(1);
 }

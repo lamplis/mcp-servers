@@ -109,7 +109,7 @@ Each point needs exactly one of `vector` or `text`. Text is batch-embedded when 
 }
 ```
 
-Pass exactly one of `vector` or `text`. `fake_qdrant_status` includes `embedding: { mode, model, baseUrlHost, dim }` when a provider started successfully.
+Pass exactly one of `vector` or `text`. `fake_qdrant_status` runs a live embedding-API probe (`POST` of `"healthcheck"`) and returns `embedding.ok`, `error`, `hint`, and `proxy` (whether `HTTPS_PROXY`/`HTTP_PROXY` was used). HTTP `/healthz` stays a fast liveness check: it always returns `status: "ok"` plus a **cached** `embedding` field (never waits on the API).
 
 ## HTTP API (Optional)
 
@@ -118,7 +118,7 @@ When enabled, the server exposes a Qdrant-compatible HTTP API:
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/` | Health check |
-| `GET` | `/healthz` | Health check |
+| `GET` | `/healthz` | Process liveness (`status: "ok"`) plus cached `embedding` probe |
 | `GET` | `/metrics` | Collection stats and lock busy flag |
 | `GET` | `/collections` | List all collections (real point counts) |
 | `PUT` | `/collections/{name}` | Create collection (idempotent if size matches; 409 if `FAKE_QDRANT_STRICT_CREATE=1`) |
@@ -270,7 +270,9 @@ Add to `.cursor/mcp.json`:
 | `FAKE_QDRANT_EMBEDDING_TIMEOUT_MS` | `30000` | HTTP timeout for embedding calls |
 | `FAKE_QDRANT_LOCAL_EMBEDDINGS_TARGET` | `http://127.0.0.1:3100` | Local-mode base URL |
 
-Each `FAKE_QDRANT_EMBEDDING_*` falls back to the matching `OPENAI_EMBED_*` so one env block can feed fake-qdrant and docsearch. Direct intranet access is assumed (`node:http` / `node:https`, no PAC). If the host later requires the corporate proxy, an explicit proxy would have to be added.
+Each `FAKE_QDRANT_EMBEDDING_*` falls back to the matching `OPENAI_EMBED_*` so one env block can feed fake-qdrant and docsearch.
+
+Node does **not** follow PAC/WPAD. Loopback targets (`127.0.0.1`, `localhost`) never use a proxy. For a non-loopback embedding host, set `HTTPS_PROXY` / `HTTP_PROXY` to an explicit proxy URL (and `NO_PROXY` if needed). After stdio handshake the process probes the API and logs `embedding.health` (stderr on failure includes `hint`). A hanging proxy must not block MCP `initialize`: `/healthz` never awaits that probe.
 
 HTTP `PUT /points` also accepts Qdrant inference vectors `{ "text": "...", "model"? }`. Missing provider → **400**. Embedding HTTP failure → **502** `{ status: { error: "embedding: ..." } }`.
 
@@ -369,7 +371,7 @@ node scripts/mcp-ps.mjs doctor
 node scripts/mcp-ps.mjs kill fake-qdrant
 ```
 
-`/healthz` now includes `pid`, `instanceId`, and `dataDir`.
+`/healthz` includes `pid`, `instanceId`, `dataDir`, and a cached `embedding` probe (`ok` / `error` / `hint`). It does not call the embedding API. Use `fake_qdrant_status` for a live round-trip.
 
 ### Empty / flagged payloads (Roo indexer)
 

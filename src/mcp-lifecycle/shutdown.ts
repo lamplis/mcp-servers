@@ -7,6 +7,7 @@ export interface ShutdownTransport {
 export interface ShutdownOptions {
   logger?: Logger;
   onShutdown: () => Promise<void> | void;
+  onExitSync?: () => void;
   transport?: ShutdownTransport;
   stdin?: NodeJS.ReadableStream;
   hardExitMs?: number;
@@ -96,6 +97,20 @@ export function installShutdownHooks(options: ShutdownOptions): () => void {
     };
     handlers.push(() => {
       options.transport!.onclose = previous ?? undefined;
+    });
+  }
+
+  if (options.onExitSync) {
+    const onExit = () => {
+      try {
+        options.onExitSync?.();
+      } catch {
+        // Ignore sync cleanup errors during process exit.
+      }
+    };
+    process.on("exit", onExit);
+    handlers.push(() => {
+      process.off("exit", onExit);
     });
   }
 

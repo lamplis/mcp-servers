@@ -4,7 +4,10 @@ import {
   OpenAICompatibleProvider,
   createProvider,
   resolveEmbeddingsUrl,
+  resolveProxyUrl,
+  classifyEmbeddingFailure,
   EmbeddingError,
+  EMBEDDING_PROBE_TEXT,
 } from "../provider.js";
 import { ConfigError, type FakeQdrantConfig } from "../config.js";
 
@@ -299,5 +302,183 @@ describe("createProvider", () => {
     });
     expect(provider).not.toBeNull();
     expect(provider!.mode).toBe("local");
+  });
+});
+
+describe("proxy routing", () => {
+  it("skips proxy for loopback even when HTTP_PROXY is set", () => {
+    const proxy = resolveProxyUrl(new URL("http://127.0.0.1:3100/v1/embeddings"), {
+      HTTP_PROXY: "http://proxy.corp:8080",
+    });
+    expect(proxy).toBeNull();
+  });
+
+  it("uses HTTP_PROXY for a non-loopback HTTP target", () => {
+    const proxy = resolveProxyUrl(new URL("http://embeddings.internal.test/v1/embeddings"), {
+      HTTP_PROXY: "http://proxy.corp:8080",
+    });
+    expect(proxy?.host).toBe("proxy.corp:8080");
+  });
+
+  it("honors NO_PROXY", () => {
+    const proxy = resolveProxyUrl(new URL("https://embeddings.internal.test/v1/embeddings"), {
+      HTTPS_PROXY: "http://proxy.corp:8080",
+      NO_PROXY: "internal.test",
+    });
+    expect(proxy).toBeNull();
+  });
+});
+
+describe("classifyEmbeddingFailure", () => {
+  const emptyEnv: NodeJS.ProcessEnv = {};
+
+  it("hints that local embeddings is not listening on loopback ECONNREFUSED", () => {
+    const diagnosed = classifyEmbeddingFailure(
+      new EmbeddingError("connect ECONNREFUSED 127.0.0.1:3100", { code: "ECONNREFUSED" }),
+      "http://127.0.0.1:3100/v1/embeddings",
+      emptyEnv
+    );
+    expect(diagnosed.hint).toMatch(/local-embeddings/);
+  });
+
+  it("hints PAC vs explicit HTTPS_PROXY when a remote host times out", () => {
+    const diagnosed = classifyEmbeddingFailure(
+      new EmbeddingError("request timed out after 30000ms", { code: "ETIMEDOUT" }),
+      "https://intranet.example.com/v1/embeddings",
+      emptyEnv
+    );
+    expect(diagnosed.hint).toMatch(/PAC\/WPAD/);
+    expect(diagnosed.hint).toMatch(/HTTPS_PROXY/);
+  });
+
+  it("hints a broken proxy when HTTPS_PROXY is set and the request still fails", () => {
+    const diagnosed = classifyEmbeddingFailure(
+      new EmbeddingError("connect ECONNREFUSED", { code: "ECONNREFUSED" }),
+      "https://intranet.example.com/v1/embeddings",
+      { HTTPS_PROXY: "http://proxy.corp:8080" }
+    );
+    expect(diagnosed.hint).toMatch(/proxy\.corp:8080/);
+    expect(diagnosed.hint).toMatch(/NO_PROXY/);
+  });
+});
+
+describe("OpenAICompatibleProvider.probe", () => {
+  it("POSTs a tiny ping and caches lastProbe on success", async () => {
+    const mock = await createMockEmbeddingServer(() => ({
+      status: 200,
+      data: {
+        model: "bge-m3",
+        data: [{ index: 0, embedding: [0.1, 0.2, 0.3] }],
+      },
+    }));
+    try {
+      const provider = new OpenAICompatibleProvider(
+        "external",
+        `http://127.0.0.1:${mock.port}`,
+        "bge-m3",
+        null,
+        3,
+        5_000
+      );
+      const probe = await provider.probe();
+      expect(probe.ok).toBe(true);
+      expect(probe.dim).toBe(3);
+      expect(probe.proxy.loopback).toBe(true);
+      expect(provider.lastProbe).toEqual(probe);
+      expect((mock.requests[0]?.body as { input: string[] }).input).toEqual([
+        EMBEDDING_PROBE_TEXT,
+      ]);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  it("returns a structured failure for loopback ECONNREFUSED", async () => {
+    const provider = new OpenAICompatibleProvider(
+      "local",
+      "http://127.0.0.1:1",
+      "Xenova/all-MiniLM-L6-v2",
+      null,
+      null,
+      1_000
+    );
+    const probe = await provider.probe();
+    expect(probe.ok).toBe(false);
+    expect(probe.code).toBe("ECONNREFUSED");
+    expect(probe.hint).toMatch(/local-embeddings/);
+    expect(provider.lastProbe?.ok).toBe(false);
+  });
+
+  it("does not send loopback requests through HTTP_PROXY", async () => {
+    const mock = await createMockEmbeddingServer(() => ({
+      status: 200,
+      data: {
+        model: "bge-m3",
+        data: [{ index: 0, embedding: [1, 0, 0] }],
+      },
+    }));
+    const previous = process.env.HTTP_PROXY;
+    process.env.HTTP_PROXY = "http://127.0.0.1:1";
+    try {
+      const provider = new OpenAICompatibleProvider(
+        "external",
+        `http://127.0.0.1:${mock.port}`,
+        "bge-m3",
+        null,
+        3,
+        5_000
+      );
+      const result = await provider.embed(["hello"]);
+      expect(result.embeddings).toEqual([[1, 0, 0]]);
+      expect(mock.requests).toHaveLength(1);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.HTTP_PROXY;
+      } else {
+        process.env.HTTP_PROXY = previous;
+      }
+      await mock.close();
+    }
+  });
+
+  it("sends non-loopback HTTP through HTTP_PROXY", async () => {
+    const mock = await createMockEmbeddingServer(() => ({
+      status: 200,
+      data: {
+        model: "bge-m3",
+        data: [{ index: 0, embedding: [1, 0, 0] }],
+      },
+    }));
+    const previousHttp = process.env.HTTP_PROXY;
+    const previousHttps = process.env.HTTPS_PROXY;
+    process.env.HTTP_PROXY = `http://127.0.0.1:${mock.port}`;
+    delete process.env.HTTPS_PROXY;
+    try {
+      const provider = new OpenAICompatibleProvider(
+        "external",
+        "http://embeddings.internal.test",
+        "bge-m3",
+        null,
+        3,
+        5_000
+      );
+      const result = await provider.embed(["ping"]);
+      expect(result.embeddings).toEqual([[1, 0, 0]]);
+      expect(mock.requests[0]?.url).toBe(
+        "http://embeddings.internal.test/v1/embeddings"
+      );
+    } finally {
+      if (previousHttp === undefined) {
+        delete process.env.HTTP_PROXY;
+      } else {
+        process.env.HTTP_PROXY = previousHttp;
+      }
+      if (previousHttps === undefined) {
+        delete process.env.HTTPS_PROXY;
+      } else {
+        process.env.HTTPS_PROXY = previousHttps;
+      }
+      await mock.close();
+    }
   });
 });

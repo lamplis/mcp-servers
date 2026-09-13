@@ -18,9 +18,14 @@ const SERVERS = [
     name: "central-memory",
     command: NODE,
     args: ["scripts/mcp-launch.mjs", "memory"],
-    env: { MCP_TAKEOVER: "1" },
+    env: {
+      MCP_TAKEOVER: "1",
+      MEMORY_FILE_PATH: path.join(ROOT, "data", "memory-validate", "memory.jsonl"),
+    },
     expectTools: ["read_graph", "create_entities"],
     callTool: { name: "read_graph", arguments: {} },
+    identityDir: path.join(ROOT, "data", "memory-validate"),
+    lockDir: path.join(ROOT, "data", "memory-validate", "memory.jsonl.lock"),
   },
   {
     name: "central-filesystem",
@@ -60,6 +65,8 @@ const SERVERS = [
     callTool: { name: "fake_qdrant_list_collections", arguments: {} },
     httpHealth: "http://127.0.0.1:16333/healthz",
     expectHealthPid: true,
+    identityDir: path.join(ROOT, "data", "fake-qdrant-validate"),
+    lockDir: path.join(ROOT, "data", "fake-qdrant-validate", ".write.lock"),
   },
   {
     name: "central-local-embeddings",
@@ -91,6 +98,8 @@ const SERVERS = [
     expectTools: ["doc-search", "doc-ingest", "doc-ingest-status"],
     callTool: { name: "doc-ingest-status", arguments: {} },
     timeoutMs: 60000,
+    identityDir: path.join(ROOT, "data", "docsearch-validate"),
+    lockDir: path.join(ROOT, "data", "docsearch-validate", "index", ".write.lock"),
   },
 ];
 
@@ -169,6 +178,85 @@ function killTree(child) {
   child.kill("SIGTERM");
 }
 
+function stopChild(child, graceMs = 2000) {
+  return new Promise((resolve) => {
+    if (!child || child.exitCode != null) {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(() => {
+      killTree(child);
+      resolve();
+    }, graceMs);
+    child.once("exit", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    try {
+      if (child.stdin && !child.stdin.destroyed) {
+        child.stdin.end();
+      }
+    } catch {
+      killTree(child);
+    }
+  });
+}
+
+function isPidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function readPidFile(lockDir) {
+  try {
+    const raw = fs.readFileSync(path.join(lockDir, "pid"), "utf8");
+    const pid = Number.parseInt(raw.trim(), 10);
+    return Number.isInteger(pid) ? pid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function checkCleanShutdown(name, identityDir, lockDir) {
+  if (!identityDir) {
+    return { name: `${name}-clean-shutdown`, ok: true, detail: "no identity dir" };
+  }
+  const leftover = [];
+  if (lockDir && fs.existsSync(lockDir)) {
+    const pid = readPidFile(lockDir);
+    if (pid == null || !isPidAlive(pid)) {
+      leftover.push(lockDir);
+    }
+  }
+  const instancePath = path.join(identityDir, "instance.json");
+  if (fs.existsSync(instancePath)) {
+    let pid;
+    try {
+      pid = JSON.parse(fs.readFileSync(instancePath, "utf8")).pid;
+    } catch {
+      pid = undefined;
+    }
+    if (pid == null || !isPidAlive(pid)) {
+      leftover.push(instancePath);
+    }
+  }
+  if (leftover.length === 0) {
+    return { name: `${name}-clean-shutdown`, ok: true, detail: "identity cleared" };
+  }
+  return {
+    name: `${name}-clean-shutdown`,
+    ok: false,
+    detail: leftover.join(", "),
+  };
+}
+
 function probeServer(spec) {
   const timeoutMs = spec.timeoutMs ?? 25000;
   return new Promise((resolve) => {
@@ -199,14 +287,14 @@ function probeServer(spec) {
       }
       settled = true;
       clearTimeout(timer);
-      killTree(child);
-      setTimeout(() => killTree(child), 500);
-      resolve({
-        name: spec.name,
-        ok,
-        detail,
-        tools,
-        stderr: stderrChunks.join("").slice(-2000),
+      void stopChild(child).then(() => {
+        resolve({
+          name: spec.name,
+          ok,
+          detail,
+          tools,
+          stderr: stderrChunks.join("").slice(-2000),
+        });
       });
     };
 
@@ -367,7 +455,7 @@ async function runLifecycleChecks() {
     });
   });
   if (!closed) {
-    killTree(first);
+    await stopChild(first);
     results.push({ name: "lifecycle-stdin-close", ok: false, detail: "did not exit within 4s" });
     console.log("FAIL");
   } else {
@@ -399,8 +487,8 @@ async function runLifecycleChecks() {
     status: 0,
     body: String(error),
   }));
-  killTree(holder);
-  killTree(second);
+  await stopChild(holder);
+  await stopChild(second);
   if (health.status === 200 && secondExit === "timeout") {
     results.push({ name: "lifecycle-takeover", ok: true, detail: "second instance serving" });
     console.log("OK");
@@ -427,8 +515,8 @@ async function runLifecycleChecks() {
   }
   const blocked = spawnFq({ MCP_TAKEOVER: "0" });
   const blockedCode = await new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      killTree(blocked);
+    const timer = setTimeout(async () => {
+      await stopChild(blocked);
       resolve("timeout");
     }, 5000);
     blocked.on("exit", (code) => {
@@ -436,7 +524,7 @@ async function runLifecycleChecks() {
       resolve(code);
     });
   });
-  killTree(keep);
+  await stopChild(keep);
   if (blockedCode !== 0 && blockedCode !== "timeout") {
     results.push({ name: "lifecycle-fail-fast", ok: true, detail: `exit ${blockedCode}` });
     console.log("OK");
@@ -448,6 +536,15 @@ async function runLifecycleChecks() {
     });
     console.log("FAIL");
   }
+  const lifecycleDir = path.join(ROOT, "data", "fake-qdrant-lifecycle");
+  process.stdout.write("- lifecycle-clean-shutdown ... ");
+  const cleaned = checkCleanShutdown(
+    "lifecycle",
+    lifecycleDir,
+    path.join(lifecycleDir, ".write.lock")
+  );
+  results.push(cleaned);
+  console.log(cleaned.ok ? `OK (${cleaned.detail})` : `FAIL (${cleaned.detail})`);
   return results;
 }
 
@@ -469,6 +566,12 @@ async function main() {
       if (result.stderr.trim()) {
         console.log(result.stderr.trim().split(/\r?\n/).slice(-12).join("\n"));
       }
+    }
+    if (spec.identityDir) {
+      process.stdout.write(`- ${spec.name}-clean-shutdown ... `);
+      const cleaned = checkCleanShutdown(spec.name, spec.identityDir, spec.lockDir);
+      results.push(cleaned);
+      console.log(cleaned.ok ? `OK (${cleaned.detail})` : `FAIL (${cleaned.detail})`);
     }
   }
   results.push(...(await runLifecycleChecks()));

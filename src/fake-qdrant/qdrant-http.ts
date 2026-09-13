@@ -21,6 +21,7 @@ import type { InstanceInfo } from "@modelcontextprotocol/mcp-lifecycle";
 import {
   EmbeddingError,
   EMBEDDING_NOT_CONFIGURED,
+  embeddingHealthPayload,
   type EmbeddingProvider,
 } from "./provider.js";
 
@@ -763,6 +764,7 @@ async function handleRequest(
       instanceId: identity.instanceId,
       dataDir: identity.dataDir,
       startedAt: identity.startedAt,
+      embedding: embeddingHealthPayload(embeddingProvider),
     });
   }
 

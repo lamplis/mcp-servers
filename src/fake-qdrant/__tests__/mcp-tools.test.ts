@@ -3,12 +3,20 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { createServer, resolveQueryVector, resolveToolPoints } from "../server.js";
 import { resolveDataDir } from "../store.js";
-import { EMBEDDING_NOT_CONFIGURED, type EmbeddingProvider } from "../provider.js";
+import { EMBEDDING_NOT_CONFIGURED, type EmbeddingProvider, type EmbeddingProbeResult } from "../provider.js";
+
+const stubProxy = {
+  envSet: false,
+  used: false,
+  host: null as string | null,
+  loopback: true,
+};
 
 const stubProvider: EmbeddingProvider = {
   mode: "external",
   model: "bge-m3",
   dimensions: 3,
+  lastProbe: null,
   describe: () => ({
     mode: "external",
     model: "bge-m3",
@@ -20,6 +28,19 @@ const stubProvider: EmbeddingProvider = {
     embeddings: texts.map(() => [1, 0, 0]),
     dimensions: 3,
   }),
+  async probe(): Promise<EmbeddingProbeResult> {
+    const result: EmbeddingProbeResult = {
+      ok: true,
+      configured: true,
+      ms: 0,
+      endpointHost: "stub.example",
+      model: "bge-m3",
+      dim: 3,
+      proxy: stubProxy,
+    };
+    stubProvider.lastProbe = result;
+    return result;
+  },
 };
 
 describe("fake-qdrant MCP factory", () => {

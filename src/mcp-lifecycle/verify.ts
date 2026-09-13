@@ -10,6 +10,39 @@ export interface VerifyDeps {
   isAlive?: (pid: number) => boolean;
   listImage?: (pid: number) => Promise<string | undefined>;
   fetchHealth?: (port: number) => Promise<Record<string, unknown> | null>;
+  commandLine?: (pid: number) => Promise<string | undefined>;
+}
+
+export function commandLineMatches(commandLine: string, argv1: string): boolean {
+  if (!argv1) {
+    return true;
+  }
+  const normalize = (value: string) => value.replace(/\\/g, "/").toLowerCase();
+  return normalize(commandLine).includes(normalize(argv1));
+}
+
+export async function getProcessCommandLine(pid: number): Promise<string | undefined> {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return undefined;
+  }
+  if (process.platform !== "win32") {
+    return undefined;
+  }
+  try {
+    const { stdout } = await execFileAsync(
+      "powershell",
+      [
+        "-NoProfile",
+        "-Command",
+        `(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CommandLine`,
+      ],
+      { windowsHide: true, timeout: 5000 }
+    );
+    const line = stdout.trim();
+    return line || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function isNodeImage(name: string | undefined): boolean {
@@ -83,6 +116,7 @@ export async function isOurProcess(options: {
   isAlive?: (pid: number) => boolean;
   listImage?: (pid: number) => Promise<string | undefined>;
   fetchHealth?: (port: number) => Promise<Record<string, unknown> | null>;
+  commandLine?: (pid: number) => Promise<string | undefined>;
 }): Promise<boolean> {
   const alive = options.isAlive ?? isPidAlive;
   if (!alive(options.pid)) {
@@ -94,6 +128,10 @@ export async function isOurProcess(options: {
   }
   const image = await (options.listImage ?? listProcessImage)(options.pid);
   if (!isNodeImage(image)) {
+    return false;
+  }
+  const commandLine = await (options.commandLine ?? getProcessCommandLine)(options.pid);
+  if (commandLine != null && !commandLineMatches(commandLine, instance.argv1)) {
     return false;
   }
   if (options.port != null) {

@@ -8,6 +8,7 @@ import {
   parseLogLevel,
   parseRetentionDays,
   parseTakeoverPolicy,
+  releaseIdentitySync,
   resolveContention,
   type InstanceInfo,
   type Logger,
@@ -23,6 +24,7 @@ export interface DocsearchLifecycle {
   identity: InstanceInfo;
   processLock: ProcessLock;
   dataDir: string;
+  lockDir: string;
 }
 
 export async function startDocsearchLifecycle(): Promise<DocsearchLifecycle> {
@@ -39,8 +41,9 @@ export async function startDocsearchLifecycle(): Promise<DocsearchLifecycle> {
     diskGate,
   });
   process.title = `mcp-${DOCSEARCH_ROLE}`;
+  const lockDir = lockDirForDataDir(CONFIG.DB_PATH);
   const processLock = await resolveContention({
-    lockDir: lockDirForDataDir(CONFIG.DB_PATH),
+    lockDir,
     dataDir,
     role: DOCSEARCH_ROLE,
     policy: parseTakeoverPolicy(),
@@ -58,7 +61,7 @@ export async function startDocsearchLifecycle(): Promise<DocsearchLifecycle> {
     logDir: logger.logDir,
     logFile: logger.currentFilePath(),
   });
-  return { logger, diskGate, identity, processLock, dataDir };
+  return { logger, diskGate, identity, processLock, dataDir, lockDir };
 }
 
 export function installDocsearchShutdown(
@@ -70,5 +73,11 @@ export function installDocsearchShutdown(
     logger: lifecycle.logger,
     transport,
     onShutdown,
+    onExitSync: () =>
+      releaseIdentitySync({
+        lockDir: lifecycle.lockDir,
+        dataDir: lifecycle.dataDir,
+        pid: process.pid,
+      }),
   });
 }

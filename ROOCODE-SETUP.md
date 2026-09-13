@@ -171,7 +171,9 @@ This is the profile that makes **`codebase_search`** work against fake-qdrant. R
 
 Roo recreates the Qdrant collection when `config.params.vectors.size` does not match (DELETE + PUT). After switching to 1024, let it re-index. Switching docsearch dimensions wipes the JSON index (`index.dim_mismatch`) — then run `doc-ingest { "source": "all", "force": true }`.
 
-Confirm the API is reachable directly (no PAC; Node does not follow WPAD). On this host the embedder is a direct intranet call:
+Confirm the API is reachable from **Node**. Node does not follow PAC/WPAD; Edge/`Invoke-WebRequest` can. After fake-qdrant starts, `fake_qdrant_status` (live probe) and `GET /healthz` → `embedding` (cached) report `ok` / `error` / `hint`. Logs: `embedding.health` in `data/fake-qdrant/logs`. If the host needs the corporate proxy, set `HTTPS_PROXY` to an explicit URL in the MCP env (not WPAD). Loopback (`127.0.0.1:3100`) never uses a proxy.
+
+On this host the embedder is a direct intranet call:
 
 ```powershell
 Invoke-WebRequest -NoProxy -Method Post https://server.com/v1/openai/embeddings `
@@ -254,7 +256,10 @@ A new fake-qdrant start verifies `/healthz` and takes over if the holder is ours
 node scripts/mcp-ps.mjs doctor
 node scripts/mcp-ps.mjs list
 node scripts/mcp-ps.mjs kill fake-qdrant
+node scripts/mcp-ps.mjs clean
 ```
+
+A start now removes dead lock dirs, `instance.json`, and `*.tmp` files (`lifecycle.clean` in the day log) before acquiring the lock. If a takeover kill does not actually die, the new process exits with `TakeoverFailedError` (`lifecycle.takeover_failed`) instead of serving without a lock. `node scripts/validate_mcps.mjs` writes memory into `data/memory-validate`, not production `data/memory`.
 
 If the server is **red** and never logged `lifecycle.start`, open `data/fake-qdrant/logs/launcher.log` first.
 
@@ -266,7 +271,8 @@ VS Code / Roo tasks (add locally; `.vscode/` is gitignored):
   "tasks": [
     { "label": "MCP: list processes", "type": "shell", "command": "node scripts/mcp-ps.mjs list" },
     { "label": "MCP: kill fake-qdrant", "type": "shell", "command": "node scripts/mcp-ps.mjs kill fake-qdrant" },
-    { "label": "MCP: kill docsearch", "type": "shell", "command": "node scripts/mcp-ps.mjs kill docsearch" }
+    { "label": "MCP: kill docsearch", "type": "shell", "command": "node scripts/mcp-ps.mjs kill docsearch" },
+    { "label": "MCP: clean stale identity", "type": "shell", "command": "node scripts/mcp-ps.mjs clean all" }
   ]
 }
 ```

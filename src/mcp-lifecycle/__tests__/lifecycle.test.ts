@@ -12,6 +12,7 @@ import {
 import { isOurProcess, isNodeImage } from "../verify.js";
 import {
   ContentionForeignError,
+  TakeoverFailedError,
   parseTakeoverPolicy,
   resolveContention,
   resolvePortContention,
@@ -62,6 +63,7 @@ describe("verify", () => {
       isAlive: () => true,
       listImage: async () => "node.exe",
       fetchHealth: async () => ({ sidecar: "fake-qdrant-mcp", pid: process.pid }),
+      commandLine: async () => undefined,
     });
     expect(ours).toBe(true);
     const foreignHealth = await isOurProcess({
@@ -73,8 +75,27 @@ describe("verify", () => {
       isAlive: () => true,
       listImage: async () => "node.exe",
       fetchHealth: async () => ({ sidecar: "other", pid: process.pid }),
+      commandLine: async () => undefined,
     });
     expect(foreignHealth).toBe(false);
+    const missingArgv = await isOurProcess({
+      pid: process.pid,
+      role: "fake-qdrant",
+      dataDir: dir,
+      isAlive: () => true,
+      listImage: async () => "node.exe",
+      commandLine: async () => "C:\\Windows\\System32\\cmd.exe",
+    });
+    expect(missingArgv).toBe(false);
+    const unknownCmd = await isOurProcess({
+      pid: process.pid,
+      role: "fake-qdrant",
+      dataDir: dir,
+      isAlive: () => true,
+      listImage: async () => "node.exe",
+      commandLine: async () => undefined,
+    });
+    expect(unknownCmd).toBe(true);
     await fs.rm(dir, { recursive: true, force: true });
   });
 });
@@ -123,6 +144,7 @@ describe("takeover", () => {
         isAlive: (pid) => (pid === 424242 ? killed.length === 0 : true),
         listImage: async () => "node.exe",
         fetchHealth: async () => ({ sidecar: "fake-qdrant-mcp", pid: 424242 }),
+        commandLine: async () => undefined,
         kill: (pid) => {
           killed.push(pid);
           void holder.release();
@@ -154,6 +176,7 @@ describe("takeover", () => {
         deps: {
           isAlive: () => true,
           listImage: async () => "chrome.exe",
+          commandLine: async () => undefined,
           sleepFn: async () => undefined,
         },
       })
@@ -185,6 +208,7 @@ describe("takeover", () => {
         deps: {
           isAlive: () => true,
           listImage: async () => "node.exe",
+          commandLine: async () => undefined,
           sleepFn: async () => undefined,
         },
       })
@@ -219,6 +243,67 @@ describe("takeover", () => {
     });
     expect(killed).toEqual([process.pid]);
   });
+
+  it("throws TakeoverFailedError when the holder never dies", async () => {
+    dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "mcp-take-fail-"));
+    const identity = await announceInstance({ role: "fake-qdrant", dataDir, port: 6333 });
+    await atomicWriteFile(
+      instanceFilePath(dataDir),
+      `${JSON.stringify({ ...identity, pid: 424242 }, null, 2)}\n`
+    );
+    const lockDir = lockDirForDataDir(dataDir);
+    const holder = await acquireProcessLock({
+      lockDir,
+      pid: 424242,
+      isAlive: () => true,
+      retries: 0,
+    });
+    await expect(
+      resolveContention({
+        lockDir,
+        dataDir,
+        role: "fake-qdrant",
+        port: 6333,
+        sidecar: "fake-qdrant-mcp",
+        policy: "takeover",
+        logger: createNoopLogger(),
+        pid: 424243,
+        waitMs: 0,
+        deps: {
+          isAlive: () => true,
+          listImage: async () => "node.exe",
+          fetchHealth: async () => ({ sidecar: "fake-qdrant-mcp", pid: 424242 }),
+          commandLine: async () => undefined,
+          kill: () => undefined,
+          sleepFn: async () => undefined,
+        },
+      })
+    ).rejects.toBeInstanceOf(TakeoverFailedError);
+    await holder.release();
+  });
+
+  it("throws TakeoverFailedError when the HTTP port never frees", async () => {
+    dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "mcp-port-fail-"));
+    await expect(
+      resolvePortContention({
+        host: "127.0.0.1",
+        port: 16333,
+        role: "fake-qdrant",
+        dataDir,
+        sidecar: "fake-qdrant-mcp",
+        policy: "takeover",
+        waitMs: 0,
+        deps: {
+          isAlive: () => true,
+          listImage: async () => "node.exe",
+          fetchHealth: async () => ({ sidecar: "fake-qdrant-mcp", pid: process.pid }),
+          kill: () => undefined,
+          isPortFree: async () => false,
+          sleepFn: async () => undefined,
+        },
+      })
+    ).rejects.toBeInstanceOf(TakeoverFailedError);
+  });
 });
 
 describe("shutdown", () => {
@@ -238,6 +323,22 @@ describe("shutdown", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(shutdowns).toBe(1);
     expect(exits).toEqual([0]);
+    uninstall();
+  });
+
+  it("runs onExitSync on the process exit fallback", () => {
+    let syncs = 0;
+    const uninstall = installShutdownHooks({
+      stdin: new EventEmitter() as EventEmitter & NodeJS.ReadableStream,
+      hardExitMs: 50,
+      exit: () => undefined,
+      onShutdown: async () => undefined,
+      onExitSync: () => {
+        syncs += 1;
+      },
+    });
+    process.emit("exit", 0);
+    expect(syncs).toBe(1);
     uninstall();
   });
 });

@@ -327,6 +327,10 @@ data/local-embeddings/logs/
 data/**/instance.json
 **/instance.json
 
+# Validation / lifecycle probe sandboxes
+data/*-validate/
+data/fake-qdrant-lifecycle/
+
 # Cross-process write locks
 **/.write.lock/
 *.jsonl.lock/

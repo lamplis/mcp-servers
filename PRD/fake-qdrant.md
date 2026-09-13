@@ -112,7 +112,7 @@ Give local development a Qdrant-like collection and query surface that works on 
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `GET` | `/` or `/healthz` | Liveness |
+| `GET` | `/` or `/healthz` | Liveness (`status: "ok"`) + cached `embedding` probe |
 | `GET` | `/metrics` | Stats + lock busy |
 | `GET` | `/collections` | List collections with point counts |
 | `PUT` | `/collections/{name}` | Create or no-op if same size (409 on mismatch; 409 if `FAKE_QDRANT_STRICT_CREATE=1`) |
@@ -201,7 +201,7 @@ Give local development a Qdrant-like collection and query surface that works on 
 - `FAKE_QDRANT_LOG_RETENTION_DAYS` - keep this many local calendar days of log files (default `3`)
 - `FAKE_QDRANT_STRICT_CREATE` - `1` makes `PUT /collections/{name}` return 409 when the name already exists (default stays idempotent for Roo)
 - `FAKE_QDRANT_EMBEDDING_PROVIDER` - `local` or `external`. Unset with a base URL infers `external`; otherwise `local`.
-- `FAKE_QDRANT_EMBEDDING_BASE_URL` / `_MODEL` / `_API_KEY` / `_DIM` / `_TIMEOUT_MS` - OpenAI-compatible client. Each falls back to `OPENAI_EMBED_*` so one env block can serve fake-qdrant and docsearch. Direct intranet access (`node:http`/`node:https`); no PAC. If a host later requires the corporate proxy, an explicit proxy would have to be added.
+- `FAKE_QDRANT_EMBEDDING_BASE_URL` / `_MODEL` / `_API_KEY` / `_DIM` / `_TIMEOUT_MS` - OpenAI-compatible client. Each falls back to `OPENAI_EMBED_*` so one env block can serve fake-qdrant and docsearch. Node does not follow PAC/WPAD. Loopback never uses a proxy; non-loopback hosts honor `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY`. Startup probes the API after stdio connect (`embedding.health`); `/healthz` reports the cached result and never blocks takeover. `fake_qdrant_status` runs a live probe.
 - `FAKE_QDRANT_LOCAL_EMBEDDINGS_TARGET` - local-mode base URL (default `http://127.0.0.1:3100`)
 - HTTP query ignores Qdrant tuning knobs `params`, `indexed_only`, `timeout`, `consistency`, `wait`. `prefetch` / `using` / `lookup_from` / `shard_key` / fusion-family objects still 400.
 
@@ -225,6 +225,7 @@ Startup reads these through `loadConfig()` and passes `dataDir` / HTTP bind into
 
 ### Testing Requirements
 - Config parsing (`loadConfig`) for HTTP, data dir, log dir/level/retention, and optional embedding-provider helper
+- Embedding `probe()` success/failure, PAC vs `HTTPS_PROXY` diagnosis, loopback skip of `HTTP_PROXY`
 - Collection create, upsert, query, compact, persist
 - HTTP shim for the supported route subset
 - Daily file logger: local-date filename, midnight rollover, 3-day prune, vector redaction, no stdout

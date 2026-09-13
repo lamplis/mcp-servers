@@ -7,6 +7,7 @@ import {
   installShutdownHooks,
   lockDirForMemoryFile,
   parseTakeoverPolicy,
+  releaseIdentitySync,
   removeInstanceFile,
   resolveContention,
 } from "@modelcontextprotocol/mcp-lifecycle";
@@ -43,8 +44,9 @@ async function main() {
   });
 
   process.title = "mcp-memory";
+  const lockDir = lockDirForMemoryFile(memoryFilePath);
   const processLock = await resolveContention({
-    lockDir: lockDirForMemoryFile(memoryFilePath),
+    lockDir,
     dataDir,
     role: "memory",
     policy: parseTakeoverPolicy(),
@@ -89,6 +91,12 @@ async function main() {
       await logger.flush();
       logger.close();
     },
+    onExitSync: () =>
+      releaseIdentitySync({
+        lockDir,
+        dataDir,
+        pid: process.pid,
+      }),
   });
 }
 

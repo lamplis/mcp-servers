@@ -4,3 +4,4 @@ export * from "./identity.js";
 export * from "./verify.js";
 export * from "./takeover.js";
 export * from "./shutdown.js";
+export * from "./clean.js";

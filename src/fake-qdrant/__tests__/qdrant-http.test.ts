@@ -119,6 +119,9 @@ describe('Fake Qdrant HTTP API Integration Tests', () => {
       expect(healthz.status).toBe(200);
       expect(healthz.data).toMatchObject({ status: 'ok' });
       expect(Number.isInteger((healthz.data as { pid?: number }).pid)).toBe(true);
+      expect((healthz.data as { embedding?: { configured?: boolean } }).embedding).toMatchObject({
+        configured: false,
+      });
     });
 
     it('should accept HEAD and trailing slash on /healthz', async () => {
@@ -1243,10 +1246,11 @@ function stubEmbeddingProvider(
     dimensions: 3,
   })
 ): EmbeddingProvider {
-  return {
+  const provider: EmbeddingProvider = {
     mode: "external",
     model: "bge-m3",
     dimensions: 3,
+    lastProbe: null,
     describe: () => ({
       mode: "external",
       model: "bge-m3",
@@ -1254,7 +1258,47 @@ function stubEmbeddingProvider(
       dim: 3,
     }),
     embed,
+    async probe() {
+      try {
+        const result = await embed(["healthcheck"]);
+        const probe = {
+          ok: true as const,
+          configured: true,
+          ms: 0,
+          endpointHost: "stub",
+          model: result.model,
+          dim: result.dimensions,
+          proxy: {
+            envSet: false,
+            used: false,
+            host: null,
+            loopback: true,
+          },
+        };
+        provider.lastProbe = probe;
+        return probe;
+      } catch (error) {
+        const probe = {
+          ok: false as const,
+          configured: true,
+          ms: 0,
+          endpointHost: "stub",
+          model: "bge-m3",
+          dim: 3,
+          error: error instanceof Error ? error.message : String(error),
+          proxy: {
+            envSet: false,
+            used: false,
+            host: null,
+            loopback: true,
+          },
+        };
+        provider.lastProbe = probe;
+        return probe;
+      }
+    },
   };
+  return provider;
 }
 
 describe("HTTP text inference via embedding provider", () => {
@@ -1332,6 +1376,36 @@ describe("HTTP text inference via embedding provider", () => {
     if (testDataDir) {
       await fs.rm(testDataDir, { recursive: true, force: true }).catch(() => undefined);
     }
+  });
+
+  it("returns cached embedding probe on /healthz without calling the API", async () => {
+    const provider = stubEmbeddingProvider();
+    provider.lastProbe = {
+      ok: false,
+      configured: true,
+      ms: 12,
+      endpointHost: "intranet.example",
+      model: "bge-m3",
+      dim: 1024,
+      error: "request timed out after 30000ms",
+      code: "ETIMEDOUT",
+      hint: "Node does not follow PAC/WPAD. If this host needs the corporate proxy, set HTTPS_PROXY to an explicit proxy URL (not WPAD) and restart the MCP.",
+      proxy: {
+        envSet: false,
+        used: false,
+        host: null,
+        loopback: false,
+      },
+    };
+    await startWithProvider(provider);
+    const healthz = await httpRequest("GET", "/healthz");
+    expect(healthz.status).toBe(200);
+    expect(healthz.data.status).toBe("ok");
+    expect(healthz.data.embedding).toMatchObject({
+      ok: false,
+      endpointHost: "intranet.example",
+      hint: expect.stringContaining("PAC/WPAD"),
+    });
   });
 
   it("embeds query { text } and upserts vector { text }", async () => {
